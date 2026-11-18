@@ -1,0 +1,125 @@
+# Crankshaft moderno: builds crankshaft-core + crankshaft-ui-slim with our patches
+# (moderno/patches) for ARM and puts them into a ready-to-flash SD image.
+#
+# Runs on every push to the "moderno" branch, or by hand from the Actions tab.
+# Result: artifact "crankshaft-moderno-<arch>" with the .img.xz to flash with Raspberry Pi Imager.
+
+name: imagen-moderna
+
+on:
+  push:
+    branches: [moderno]
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "Arquitectura (arm64 = 64 bits, armhf = 32 bits)"
+        required: true
+        default: arm64
+        type: choice
+        options: [arm64, armhf]
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  ARCH: ${{ inputs.arch || 'arm64' }}
+
+jobs:
+  debs:
+    name: Paquetes (${{ inputs.arch || 'arm64' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Aplicar parches
+        run: |
+          set -euo pipefail
+          git -C src/crankshaft-core apply "$PWD/moderno/patches/crankshaft-core.patch"
+          git -C src/crankshaft-ui-slim apply "$PWD/moderno/patches/crankshaft-ui-slim.patch"
+
+      - uses: docker/setup-qemu-action@v4
+
+      - name: Compilar y probar en Debian trixie ARM
+        run: |
+          set -euo pipefail
+          case "$ARCH" in arm64) PLATFORM=linux/arm64 ;; armhf) PLATFORM=linux/arm/v7 ;; esac
+          docker run --rm --platform "$PLATFORM" -e DEBIAN_FRONTEND=noninteractive \
+            -v "$PWD/src:/work" -w /work debian:trixie-slim bash -lc '
+              set -euo pipefail
+              for p in crankshaft-core crankshaft-ui-slim; do
+                (cd "$p" && ./build.sh --install-deps && BUILD_TESTS=ON BUILD_PACKAGE=ON ./build.sh --clean)
+              done
+              chown -R "$(stat -c "%u:%g" /work)" /work'
+          mkdir -p debs
+          cp src/crankshaft-core/build-release/packages/*.deb src/crankshaft-ui-slim/build-release/packages/*.deb debs/
+          for d in debs/*.deb; do dpkg-deb -f "$d" Package Version Architecture; done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: debs-${{ env.ARCH }}
+          path: debs/*.deb
+          retention-days: 30
+
+  imagen:
+    name: Imagen SD (${{ inputs.arch || 'arm64' }})
+    needs: debs
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: debs-${{ env.ARCH }}
+          path: image_builder/stages/stage60/06-moderno-packages/files/debs
+
+      - name: Preparar pi-gen
+        run: |
+          set -euo pipefail
+          case "$ARCH" in arm64) BRANCH=arm64 ;; armhf) BRANCH=master ;; esac
+          git clone --depth 1 --branch "$BRANCH" https://github.com/RPi-Distro/pi-gen.git pi-gen
+          cp -r image_builder/stages/stage60 pi-gen/stage60
+          find pi-gen/stage60 -type f -name "*.sh" -exec chmod +x {} \;
+          sed -i 's/qemu-user-binfmt/qemu-user-static/g' pi-gen/depends
+          # Spanish clock and keyboard (upstream default is Europe/London, UK keyboard).
+          sed -e "s|@@IMG_NAME@@|crankshaft-moderno-${ARCH}-$(date +%Y-%m-%d)|g" \
+              -e 's|@@RELEASE@@|trixie|g' -e 's|@@CRANKSHAFT_APT_SUITE@@|trixie|g' \
+              -e 's|@@CRANKSHAFT_ENABLE_NIGHTLY@@|false|g' \
+              -e "s|^TIMEZONE_DEFAULT=.*|TIMEZONE_DEFAULT='Europe/Madrid'|" \
+              -e "s|^KEYBOARD_KEYMAP=.*|KEYBOARD_KEYMAP='es'|" \
+              -e "s|^KEYBOARD_LAYOUT=.*|KEYBOARD_LAYOUT='Spanish'|" \
+              image_builder/pi-gen-stages/config-template > pi-gen/config
+          cat pi-gen/config
+
+      - name: Dependencias del host
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y coreutils quilt parted qemu-user-static debootstrap zerofree zip \
+            dosfstools e2fsprogs libarchive-tools libcap2-bin grep rsync xz-utils \
+            file git curl bc gpg pigz xxd arch-test bmap-tools kmod binfmt-support
+          sudo modprobe binfmt_misc
+          sudo ln -sf /usr/bin/qemu-arm-static /usr/local/bin/qemu-arm
+          sudo ln -sf /usr/bin/qemu-aarch64-static /usr/local/bin/qemu-aarch64
+          sudo update-binfmts --enable qemu-arm
+          sudo update-binfmts --enable qemu-aarch64
+          arch-test "$ARCH"
+
+      - name: Construir imagen
+        working-directory: pi-gen
+        run: |
+          sudo ./build.sh
+          sudo chown -R "$(id -u):$(id -g)" deploy work || true
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: crankshaft-moderno-${{ env.ARCH }}
+          path: pi-gen/deploy/
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: registro-fallo-${{ env.ARCH }}
+          path: pi-gen/work/**/build.log
+          retention-days: 7

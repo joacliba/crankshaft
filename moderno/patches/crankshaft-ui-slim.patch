@@ -1,0 +1,679 @@
+diff --git a/src/CoreClient.cpp b/src/CoreClient.cpp
+index 6045e01..25be588 100644
+--- a/src/CoreClient.cpp
++++ b/src/CoreClient.cpp
+@@ -408,10 +408,22 @@ auto CoreClient::sendTouchEvent(const QString& eventType, const QVariantList& po
+     const int pointerId = firstPoint.value("id", 0).toInt();
+     const double pressure = firstPoint.value("pressure", 1.0).toDouble();
+ 
++    // Every changed finger goes in "points" (multi-touch: pinch-zoom); x/y stay for older cores.
++    QJsonArray pointArray;
++    for (const QVariant& point : points) {
++        const QVariantMap map = point.toMap();
++        QJsonObject p;
++        p["id"] = map.value("id", 0).toInt();
++        p["x"] = map.value("x").toDouble();
++        p["y"] = map.value("y").toDouble();
++        pointArray.append(p);
++    }
++
+     QJsonObject touchPayload;
+     touchPayload["x"] = x;
+     touchPayload["y"] = y;
+     touchPayload["action"] = eventType;
++    touchPayload["points"] = pointArray;
+ 
+     QJsonObject touchMessage;
+     touchMessage["type"] = "publish";
+diff --git a/src/qml/ConnectionStatusView.qml b/src/qml/ConnectionStatusView.qml
+index 663cd47..1d18a6f 100644
+--- a/src/qml/ConnectionStatusView.qml
++++ b/src/qml/ConnectionStatusView.qml
+@@ -48,135 +48,203 @@ Item {
+ 
+     property int connectionState: androidAutoFacade ? androidAutoFacade.connectionState : stateDisconnected
+ 
++    signal settingsRequested()
++
++    // Home clock: refreshed every second, only while the home screen is shown.
++    property date now: new Date()
++    Timer {
++        interval: 1000
++        repeat: true
++        running: statusView.visible
++        triggeredOnStart: true
++        onTriggered: statusView.now = new Date()
++    }
++
+     Rectangle {
+         anchors.fill: parent
+         color: palette.backgroundColor
+     }
+ 
+-    Rectangle {
+-        anchors.centerIn: parent
+-        width: Math.min(520, parent.width * 0.86)
+-        height: Math.min(360, parent.height * 0.86)
+-        radius: palette.radiusLarge
+-        color: Qt.rgba(palette.surfaceColor.r, palette.surfaceColor.g, palette.surfaceColor.b, 0.96)
+-        border.width: 1
+-        border.color: palette.borderColor
++    GridLayout {
++        anchors.fill: parent
++        anchors.margins: palette.spacingLarge
++        columns: statusView.width >= statusView.height ? 2 : 1
++        columnSpacing: palette.spacingLarge
++        rowSpacing: palette.spacingLarge
+ 
++        // Left: clock, date and the big settings button.
+         ColumnLayout {
+-            anchors.fill: parent
+-            anchors.margins: palette.spacing
+-            spacing: palette.spacingLarge
+-
+-            Item {
+-                Layout.preferredWidth: 120
+-                Layout.preferredHeight: 120
+-                Layout.alignment: Qt.AlignHCenter
+-
+-                BusyIndicator {
+-                    anchors.centerIn: parent
+-                    width: 80
+-                    height: 80
+-                    running: statusView.connectionState === stateSearching ||
+-                             statusView.connectionState === stateConnecting
+-                }
++            Layout.fillWidth: true
++            Layout.fillHeight: true
++            spacing: palette.spacingMedium
+ 
+-                Text {
+-                    anchors.centerIn: parent
+-                    visible: !statusView.isLoadingState()
+-                    text: statusView.connectionState === stateConnected ? "✓" :
+-                          statusView.connectionState === stateError ? "✗" : "○"
+-                    font.pixelSize: 64
+-                    color: statusView.connectionState === stateConnected ? palette.successColor :
+-                           statusView.connectionState === stateError ? palette.errorColor :
+-                           palette.textSecondaryColor
+-                }
+-            }
++            Item { Layout.fillHeight: true }
+ 
+             Label {
+-                text: getStatusText()
+-                font.pixelSize: palette.fontSizeHeading
+-                font.bold: true
++                text: Qt.formatTime(statusView.now, "HH:mm")
++                font.pixelSize: Math.min(statusView.height * 0.28, 140)
++                font.weight: Font.Light
+                 color: palette.textPrimaryColor
+-                horizontalAlignment: Text.AlignHCenter
+-                wrapMode: Text.WordWrap
+-                Layout.fillWidth: true
++                Layout.alignment: Qt.AlignHCenter
+             }
+ 
+             Label {
+-                text: getStatusDetails()
+-                font.pixelSize: palette.fontSizeBody
++                text: statusView.now.toLocaleDateString(Qt.locale(), "dddd, d MMMM")
++                font.pixelSize: t.typography.h3
+                 color: palette.textSecondaryColor
+-                horizontalAlignment: Text.AlignHCenter
+-                wrapMode: Text.WordWrap
+-                Layout.fillWidth: true
++                Layout.alignment: Qt.AlignHCenter
+             }
+ 
+-            Label {
+-                visible: statusView.connectionState === stateError
+-                text: androidAutoFacade ? androidAutoFacade.lastError : ""
+-                font.pixelSize: palette.fontSizeBody
+-                color: palette.errorColor
+-                horizontalAlignment: Text.AlignHCenter
+-                wrapMode: Text.WordWrap
++            Item { Layout.fillHeight: true }
++
++            Button {
++                id: homeSettingsButton
++                text: qsTr("Settings")
+                 Layout.fillWidth: true
++                Layout.preferredHeight: t.dimensions.buttonHeight + 8
++                onClicked: statusView.settingsRequested()
++
++                background: Rectangle {
++                    radius: palette.radiusLarge
++                    color: homeSettingsButton.pressed ? palette.borderColor : palette.surfaceColor
++                    border.width: 1
++                    border.color: palette.borderColor
++                }
++
++                contentItem: Text {
++                    text: "⚙  " + homeSettingsButton.text
++                    font.pixelSize: t.typography.h4
++                    color: palette.textPrimaryColor
++                    horizontalAlignment: Text.AlignHCenter
++                    verticalAlignment: Text.AlignVCenter
++                }
+             }
++        }
+ 
+-            RowLayout {
+-                spacing: palette.spacingMedium
+-                Layout.alignment: Qt.AlignHCenter
++        Rectangle {
++            Layout.fillWidth: true
++            Layout.fillHeight: true
++            radius: palette.radiusLarge
++            color: Qt.rgba(palette.surfaceColor.r, palette.surfaceColor.g, palette.surfaceColor.b, 0.96)
++            border.width: 1
++            border.color: palette.borderColor
+ 
+-                Button {
+-                    visible: statusView.connectionState === stateError
+-                    text: qsTr("Retry")
+-                    Layout.preferredHeight: palette.touchTargetMinimum
+-                    Layout.preferredWidth: 150
+-
+-                    background: Rectangle {
+-                        color: parent.pressed ? palette.accentColorPressed :
+-                               parent.hovered ? palette.accentColorHover :
+-                               palette.accentColor
+-                        radius: palette.radiusSmall
+-                    }
++            ColumnLayout {
++                anchors.fill: parent
++                anchors.margins: palette.spacing
++                spacing: palette.spacingLarge
++
++                Item {
++                    Layout.preferredWidth: 120
++                    Layout.preferredHeight: 120
++                    Layout.alignment: Qt.AlignHCenter
+ 
+-                    contentItem: Text {
+-                        text: parent.text
+-                        font.pixelSize: palette.fontSizeBody
+-                        color: "white"
+-                        horizontalAlignment: Text.AlignHCenter
+-                        verticalAlignment: Text.AlignVCenter
++                    BusyIndicator {
++                        anchors.centerIn: parent
++                        width: 80
++                        height: 80
++                        running: statusView.connectionState === stateSearching ||
++                                 statusView.connectionState === stateConnecting
+                     }
+ 
+-                    onClicked: {
+-                        if (androidAutoFacade) {
+-                            androidAutoFacade.retryConnection()
+-                        }
++                    Text {
++                        anchors.centerIn: parent
++                        visible: !statusView.isLoadingState()
++                        text: statusView.connectionState === stateConnected ? "✓" :
++                              statusView.connectionState === stateError ? "✗" : "○"
++                        font.pixelSize: 64
++                        color: statusView.connectionState === stateConnected ? palette.successColor :
++                               statusView.connectionState === stateError ? palette.errorColor :
++                               palette.textSecondaryColor
+                     }
+                 }
+ 
+-                Button {
+-                    visible: statusView.connectionState === stateConnected
+-                    text: qsTr("Disconnect")
+-                    Layout.preferredHeight: palette.touchTargetMinimum
+-                    Layout.preferredWidth: 150
+-
+-                    background: Rectangle {
+-                        color: parent.pressed ? Qt.darker(palette.errorColor, 1.3) :
+-                               parent.hovered ? Qt.lighter(palette.errorColor, 1.1) :
+-                               palette.errorColor
+-                        radius: palette.radiusSmall
+-                    }
++                Label {
++                    text: getStatusText()
++                    font.pixelSize: palette.fontSizeHeading
++                    font.bold: true
++                    color: palette.textPrimaryColor
++                    horizontalAlignment: Text.AlignHCenter
++                    wrapMode: Text.WordWrap
++                    Layout.fillWidth: true
++                }
++
++                Label {
++                    text: getStatusDetails()
++                    font.pixelSize: palette.fontSizeBody
++                    color: palette.textSecondaryColor
++                    horizontalAlignment: Text.AlignHCenter
++                    wrapMode: Text.WordWrap
++                    Layout.fillWidth: true
++                }
++
++                Label {
++                    visible: statusView.connectionState === stateError
++                    text: androidAutoFacade ? androidAutoFacade.lastError : ""
++                    font.pixelSize: palette.fontSizeBody
++                    color: palette.errorColor
++                    horizontalAlignment: Text.AlignHCenter
++                    wrapMode: Text.WordWrap
++                    Layout.fillWidth: true
++                }
++
++                RowLayout {
++                    spacing: palette.spacingMedium
++                    Layout.alignment: Qt.AlignHCenter
+ 
+-                    contentItem: Text {
+-                        text: parent.text
+-                        font.pixelSize: palette.fontSizeBody
+-                        color: "white"
+-                        horizontalAlignment: Text.AlignHCenter
+-                        verticalAlignment: Text.AlignVCenter
++                    Button {
++                        visible: statusView.connectionState === stateError
++                        text: qsTr("Retry")
++                        Layout.preferredHeight: palette.touchTargetMinimum
++                        Layout.preferredWidth: 150
++
++                        background: Rectangle {
++                            color: parent.pressed ? palette.accentColorPressed :
++                                   parent.hovered ? palette.accentColorHover :
++                                   palette.accentColor
++                            radius: palette.radiusSmall
++                        }
++
++                        contentItem: Text {
++                            text: parent.text
++                            font.pixelSize: palette.fontSizeBody
++                            color: "white"
++                            horizontalAlignment: Text.AlignHCenter
++                            verticalAlignment: Text.AlignVCenter
++                        }
++
++                        onClicked: {
++                            if (androidAutoFacade) {
++                                androidAutoFacade.retryConnection()
++                            }
++                        }
+                     }
+ 
+-                    onClicked: {
+-                        if (androidAutoFacade) {
+-                            androidAutoFacade.disconnectDevice()
++                    Button {
++                        visible: statusView.connectionState === stateConnected
++                        text: qsTr("Disconnect")
++                        Layout.preferredHeight: palette.touchTargetMinimum
++                        Layout.preferredWidth: 150
++
++                        background: Rectangle {
++                            color: parent.pressed ? Qt.darker(palette.errorColor, 1.3) :
++                                   parent.hovered ? Qt.lighter(palette.errorColor, 1.1) :
++                                   palette.errorColor
++                            radius: palette.radiusSmall
++                        }
++
++                        contentItem: Text {
++                            text: parent.text
++                            font.pixelSize: palette.fontSizeBody
++                            color: "white"
++                            horizontalAlignment: Text.AlignHCenter
++                            verticalAlignment: Text.AlignVCenter
++                        }
++
++                        onClicked: {
++                            if (androidAutoFacade) {
++                                androidAutoFacade.disconnectDevice()
++                            }
+                         }
+                     }
+                 }
+diff --git a/src/qml/SettingsPanel.qml b/src/qml/SettingsPanel.qml
+index 0510e0c..6ac683f 100644
+--- a/src/qml/SettingsPanel.qml
++++ b/src/qml/SettingsPanel.qml
+@@ -18,8 +18,8 @@ Dialog {
+     readonly property bool isQuarterTurn: displayRotation === 90 || displayRotation === 270
+     readonly property int contentMargin: isQuarterTurn ? 12 : 18
+     readonly property int sectionSpacing: isQuarterTurn ? 8 : 12
+-    readonly property int headerTitleSize: isQuarterTurn ? 16 : 18
+-    readonly property int tabFontSize: isQuarterTurn ? 10 : 11
++    readonly property int headerTitleSize: isQuarterTurn ? 20 : 22
++    readonly property int tabFontSize: isQuarterTurn ? 13 : 15
+     readonly property int panelInnerMargin: isQuarterTurn ? 10 : 14
+     title: ""
+     modal: true
+@@ -104,7 +104,7 @@ Dialog {
+                     id: tabBar
+                     Layout.fillWidth: true
+                     spacing: settingsPanel.isQuarterTurn ? 1 : 2
+-                    Layout.preferredHeight: settingsPanel.isQuarterTurn ? 38 : implicitHeight
++                    Layout.preferredHeight: settingsPanel.isQuarterTurn ? 52 : 60
+ 
+                     TabButton {
+                         text: qsTr("Display", "SettingsPanel")
+diff --git a/src/qml/ThemeManager.qml b/src/qml/ThemeManager.qml
+index 5cb809b..9130a2e 100644
+--- a/src/qml/ThemeManager.qml
++++ b/src/qml/ThemeManager.qml
+@@ -138,8 +138,8 @@ QtObject {
+     // Dimensions (Design for Driving compliance)
+     readonly property QtObject dimensions: QtObject {
+         // Touch targets (minimum 44pt for driving)
+-        readonly property int minTouchTarget: 44
+-        readonly property int recommendedTouchTarget: 56
++        readonly property int minTouchTarget: 56
++        readonly property int recommendedTouchTarget: 64
+         
+         // Border radius
+         readonly property int borderRadiusSmall: 4
+@@ -153,7 +153,7 @@ QtObject {
+         readonly property int iconXLarge: 48
+         
+         // Component heights
+-        readonly property int buttonHeight: 56
++        readonly property int buttonHeight: 64
+         readonly property int toolbarHeight: 64
+         readonly property int listItemHeight: 72
+     }
+diff --git a/src/qml/ViewNavigationController.qml b/src/qml/ViewNavigationController.qml
+index 2e9f64a..0f6ce1c 100644
+--- a/src/qml/ViewNavigationController.qml
++++ b/src/qml/ViewNavigationController.qml
+@@ -79,7 +79,10 @@ QtObject {
+      */
+     function showSettings() {
+         settingsPanelVisible = true
+-        currentViewState = viewStateSettings
++        // Opened from the home screen: keep it behind the panel instead of the projection view.
++        if (currentViewState !== viewStateConnectionStatus) {
++            currentViewState = viewStateSettings
++        }
+         videoRenderingEnabled = false  // Pause GPU rendering while overlay open
+         
+         // AA service continues running in background
+@@ -95,7 +98,9 @@ QtObject {
+      */
+     function closeSettings() {
+         settingsPanelVisible = false
+-        currentViewState = viewStateAAProjection
++        if (currentViewState === viewStateSettings) {
++            currentViewState = viewStateAAProjection
++        }
+         videoRenderingEnabled = true  // Resume GPU rendering
+     }
+     
+diff --git a/src/qml/components/ConnectionPreferenceToggle.qml b/src/qml/components/ConnectionPreferenceToggle.qml
+index e978494..4434de7 100644
+--- a/src/qml/components/ConnectionPreferenceToggle.qml
++++ b/src/qml/components/ConnectionPreferenceToggle.qml
+@@ -48,7 +48,7 @@ ColumnLayout {
+     Label {
+         visible: connectionToggle.showLabel
+         text: connectionToggle.titleText
+-        font.pointSize: 12
++        font.pointSize: 15
+         font.bold: true
+     }
+     
+@@ -59,7 +59,7 @@ ColumnLayout {
+         SegmentedOptionButton {
+             baseText: qsTr("USB", "ConnectionPreferenceToggle")
+             Layout.fillWidth: true
+-            Layout.preferredHeight: 46
++            Layout.preferredHeight: 64
+             ButtonGroup.group: connectionPreferenceGroup
+             checked: connectionToggle.currentPreference === "USB"
+             
+@@ -74,7 +74,7 @@ ColumnLayout {
+         SegmentedOptionButton {
+             baseText: qsTr("Wireless", "ConnectionPreferenceToggle")
+             Layout.fillWidth: true
+-            Layout.preferredHeight: 46
++            Layout.preferredHeight: 64
+             ButtonGroup.group: connectionPreferenceGroup
+             checked: connectionToggle.currentPreference === "WIRELESS"
+             
+diff --git a/src/qml/components/DisplayRotationToggle.qml b/src/qml/components/DisplayRotationToggle.qml
+index c936c48..6f2fa3a 100644
+--- a/src/qml/components/DisplayRotationToggle.qml
++++ b/src/qml/components/DisplayRotationToggle.qml
+@@ -26,7 +26,7 @@ ColumnLayout {
+     Label {
+         visible: rotationToggle.showLabel
+         text: rotationToggle.titleText
+-        font.pointSize: 12
++        font.pointSize: 15
+         font.bold: true
+     }
+ 
+@@ -37,7 +37,7 @@ ColumnLayout {
+         SegmentedOptionButton {
+             baseText: qsTr("0", "DisplayRotationToggle")
+             Layout.fillWidth: true
+-            Layout.preferredHeight: 46
++            Layout.preferredHeight: 64
+             ButtonGroup.group: rotationGroup
+             checked: rotationToggle.currentRotation === 0
+ 
+@@ -52,7 +52,7 @@ ColumnLayout {
+         SegmentedOptionButton {
+             baseText: qsTr("90", "DisplayRotationToggle")
+             Layout.fillWidth: true
+-            Layout.preferredHeight: 46
++            Layout.preferredHeight: 64
+             ButtonGroup.group: rotationGroup
+             checked: rotationToggle.currentRotation === 90
+ 
+@@ -67,7 +67,7 @@ ColumnLayout {
+         SegmentedOptionButton {
+             baseText: qsTr("180", "DisplayRotationToggle")
+             Layout.fillWidth: true
+-            Layout.preferredHeight: 46
++            Layout.preferredHeight: 64
+             ButtonGroup.group: rotationGroup
+             checked: rotationToggle.currentRotation === 180
+ 
+@@ -82,7 +82,7 @@ ColumnLayout {
+         SegmentedOptionButton {
+             baseText: qsTr("270", "DisplayRotationToggle")
+             Layout.fillWidth: true
+-            Layout.preferredHeight: 46
++            Layout.preferredHeight: 64
+             ButtonGroup.group: rotationGroup
+             checked: rotationToggle.currentRotation === 270
+ 
+diff --git a/src/qml/components/SettingsCard.qml b/src/qml/components/SettingsCard.qml
+index a7bb9cd..9011b19 100644
+--- a/src/qml/components/SettingsCard.qml
++++ b/src/qml/components/SettingsCard.qml
+@@ -30,7 +30,7 @@ Rectangle {
+         Label {
+             text: card.title
+             visible: text !== ""
+-            font.pointSize: 12
++            font.pointSize: 15
+             font.bold: true
+             color: card.Material.foreground
+         }
+diff --git a/src/qml/components/SettingsSlider.qml b/src/qml/components/SettingsSlider.qml
+index 2031ea7..3ab8519 100644
+--- a/src/qml/components/SettingsSlider.qml
++++ b/src/qml/components/SettingsSlider.qml
+@@ -19,6 +19,7 @@
+ 
+ import QtQuick
+ import QtQuick.Controls
++import QtQuick.Controls.Material
+ import QtQuick.Layouts
+ 
+ /**
+@@ -45,7 +46,7 @@ ColumnLayout {
+     Label {
+         id: labelText
+         visible: text !== ""
+-        font.pointSize: 12
++        font.pointSize: 15
+         font.bold: true
+     }
+     
+@@ -54,7 +55,18 @@ ColumnLayout {
+         spacing: 16
+         
+         Slider {
++            id: slider
+             Layout.fillWidth: true
++            // Large grab area and handle: usable with a finger while driving.
++            Layout.preferredHeight: 64
++            handle: Rectangle {
++                x: slider.leftPadding + slider.visualPosition * (slider.availableWidth - width)
++                y: slider.topPadding + (slider.availableHeight - height) / 2
++                width: 34
++                height: 34
++                radius: 17
++                color: slider.pressed ? Qt.darker(Material.accent, 1.15) : Material.accent
++            }
+             from: settingsSlider.from
+             to: settingsSlider.to
+             stepSize: 1
+@@ -69,7 +81,7 @@ ColumnLayout {
+         
+         Label {
+             text: settingsSlider.value + settingsSlider.valueSuffix
+-            font.pointSize: 11
++            font.pointSize: 14
+             Layout.minimumWidth: 40
+             horizontalAlignment: Text.AlignRight
+         }
+diff --git a/src/qml/components/ThemeToggle.qml b/src/qml/components/ThemeToggle.qml
+index 2e59dac..a585cb0 100644
+--- a/src/qml/components/ThemeToggle.qml
++++ b/src/qml/components/ThemeToggle.qml
+@@ -48,7 +48,7 @@ ColumnLayout {
+     Label {
+         visible: themeToggle.showLabel
+         text: themeToggle.titleText
+-        font.pointSize: 12
++        font.pointSize: 15
+         font.bold: true
+     }
+     
+@@ -59,7 +59,7 @@ ColumnLayout {
+         SegmentedOptionButton {
+             baseText: qsTr("Light", "ThemeToggle")
+             Layout.fillWidth: true
+-            Layout.preferredHeight: 46
++            Layout.preferredHeight: 64
+             ButtonGroup.group: themeToggleGroup
+             checked: themeToggle.currentMode === "LIGHT"
+             
+@@ -74,7 +74,7 @@ ColumnLayout {
+         SegmentedOptionButton {
+             baseText: qsTr("Dark", "ThemeToggle")
+             Layout.fillWidth: true
+-            Layout.preferredHeight: 46
++            Layout.preferredHeight: 64
+             ButtonGroup.group: themeToggleGroup
+             checked: themeToggle.currentMode === "DARK"
+             
+diff --git a/src/qml/main.qml b/src/qml/main.qml
+index 7cf15c2..b2af41b 100644
+--- a/src/qml/main.qml
++++ b/src/qml/main.qml
+@@ -327,6 +327,7 @@ ApplicationWindow {
+             visible: navigationController.currentViewState === navigationController.viewStateConnectionStatus
+             themeManager: theme
+             androidAutoFacade: _androidAutoFacade
++            onSettingsRequested: navigationController.showSettings()
+         }
+         
+         // AndroidAuto Projection View (primary)
+diff --git a/src/qml/settings/BluetoothSettingsTab.qml b/src/qml/settings/BluetoothSettingsTab.qml
+index da8b6e1..551822e 100644
+--- a/src/qml/settings/BluetoothSettingsTab.qml
++++ b/src/qml/settings/BluetoothSettingsTab.qml
+@@ -162,7 +162,7 @@ Item {
+                             text: root.bt && root.bt.btEnabled
+                                   ? qsTr("Enabled", "SettingsPanel")
+                                   : qsTr("Disabled", "SettingsPanel")
+-                            font.pointSize: 10
++                            font.pointSize: 13
+                             font.bold: true
+                         }
+                     }
+@@ -179,7 +179,7 @@ Item {
+                     Label {
+                         visible: root.bt ? root.bt.discovering : false
+                         text: qsTr("Scanning", "SettingsPanel")
+-                        font.pointSize: 10
++                        font.pointSize: 13
+                         opacity: 0.8
+                     }
+                 }
+@@ -189,7 +189,7 @@ Item {
+                     text: root.bt && root.bt.hasConnectedAudioDevice
+                           ? qsTr("Active device: %1", "SettingsPanel").arg(root.bt.connectedAudioName)
+                           : qsTr("No device currently connected", "SettingsPanel")
+-                    font.pointSize: 11
++                    font.pointSize: 14
+                     opacity: 0.85
+                     wrapMode: Text.WordWrap
+                 }
+@@ -198,7 +198,7 @@ Item {
+                     width: parent.width
+                     visible: !(!!root.bt && root.bt.btEnabled)
+                     text: qsTr("Bluetooth is currently disabled at system level. Enable Bluetooth from system settings to manage pairing and audio routing here.", "SettingsPanel")
+-                    font.pointSize: 11
++                    font.pointSize: 14
+                     opacity: 0.82
+                     wrapMode: Text.WordWrap
+                 }
+@@ -304,7 +304,7 @@ Item {
+                         text: root.bt && root.bt.discovering
+                               ? qsTr("Searching for nearby devices...", "SettingsPanel")
+                               : qsTr("Choose a device below, then pair.", "SettingsPanel")
+-                        font.pointSize: 10
++                        font.pointSize: 13
+                         opacity: 0.8
+                         elide: Text.ElideRight
+                     }
+@@ -362,7 +362,7 @@ Item {
+                                 Label {
+                                     visible: modelData.paired === true
+                                     text: qsTr("Paired", "SettingsPanel")
+-                                    font.pointSize: 10
++                                    font.pointSize: 13
+                                     opacity: 0.8
+                                 }
+                             }
+@@ -403,7 +403,7 @@ Item {
+                         text: root.selectedDiscoveredAddress !== ""
+                               ? qsTr("Selected: %1", "SettingsPanel").arg(root.selectedDiscoveredAddress)
+                               : qsTr("No device selected", "SettingsPanel")
+-                        font.pointSize: 10
++                        font.pointSize: 13
+                         opacity: 0.8
+                         elide: Text.ElideMiddle
+                     }
+@@ -427,7 +427,7 @@ Item {
+                 Label {
+                     width: parent.width
+                     text: root.bt ? root.bt.statusMessage : ""
+-                    font.pointSize: 11
++                    font.pointSize: 14
+                     visible: text !== ""
+                     wrapMode: Text.WordWrap
+                 }
+@@ -435,7 +435,7 @@ Item {
+                 Label {
+                     width: parent.width
+                     text: root.bt ? root.bt.lastError : ""
+-                    font.pointSize: 11
++                    font.pointSize: 14
+                     color: Material.color(Material.Red)
+                     visible: text !== ""
+                     wrapMode: Text.WordWrap

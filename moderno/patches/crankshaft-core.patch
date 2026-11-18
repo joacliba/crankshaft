@@ -1,0 +1,447 @@
+diff --git a/src/services/android_auto/AndroidAutoService.h b/src/services/android_auto/AndroidAutoService.h
+index 456cee2..4f41133 100644
+--- a/src/services/android_auto/AndroidAutoService.h
++++ b/src/services/android_auto/AndroidAutoService.h
+@@ -25,8 +25,18 @@
+ #include <QSize>
+ #include <QString>
+ #include <QVariantMap>
++#include <QVector>
+ #include <memory>
+ 
++/**
++ * @brief One finger of a (multi-)touch event, in AA projection coordinates.
++ */
++struct TouchPointer {
++  int id{0};
++  int x{0};
++  int y{0};
++};
++
+ // Forward declarations
+ class MediaPipeline;
+ class ProfileManager;
+@@ -177,6 +187,17 @@ class AndroidAutoService : public QObject {
+    */
+   virtual bool sendTouchInput(int x, int y, int action) = 0;
+ 
++  /**
++   * @brief Send the fingers that changed in one touch event (multi-touch).
++   * @param points Changed fingers (pressed, moved or released)
++   * @param action Touch action for those fingers (0=down, 1=up, 2=move)
++   *
++   * Default: single-touch fallback using the first finger only.
++   */
++  virtual bool sendMultiTouchInput(const QVector<TouchPointer>& points, int action) {
++    return !points.isEmpty() && sendTouchInput(points.first().x, points.first().y, action);
++  }
++
+   /**
+    * @brief Send key input to device
+    * @param key_code Android key code
+diff --git a/src/services/android_auto/ProtocolHelpers.cpp b/src/services/android_auto/ProtocolHelpers.cpp
+index 9b03965..da4ed15 100644
+--- a/src/services/android_auto/ProtocolHelpers.cpp
++++ b/src/services/android_auto/ProtocolHelpers.cpp
+@@ -71,6 +71,74 @@ aap_protobuf::service::inputsource::message::InputReport createTouchInputReport(
+   return inputReport;
+ }
+ 
++QVector<TouchReportStep> buildTouchReportSteps(QVector<ActiveTouchPointer>& active,
++                                               const QVector<TouchPointer>& changed, int action) {
++  using aap_protobuf::service::inputsource::message::PointerAction;
++  QVector<TouchReportStep> steps;
++
++  auto indexOf = [&active](int id) {
++    for (int i = 0; i < active.size(); ++i) {
++      if (active[i].point.id == id) return i;
++    }
++    return -1;
++  };
++  auto freeSlot = [&active]() {
++    for (int slot = 0;; ++slot) {
++      bool used = false;
++      for (const auto& a : active) used = used || a.slot == slot;
++      if (!used) return slot;
++    }
++  };
++
++  if (action == 0) {
++    for (const TouchPointer& p : changed) {
++      const int stale = indexOf(p.id);  // a lost release left this id behind
++      if (stale >= 0) active.remove(stale);
++      active.append({p, freeSlot()});
++      steps.append({active.size() == 1 ? PointerAction::ACTION_DOWN
++                                       : PointerAction::ACTION_POINTER_DOWN,
++                    static_cast<int>(active.size()) - 1, active});
++    }
++  } else if (action == 1) {
++    for (const TouchPointer& p : changed) {
++      const int idx = indexOf(p.id);
++      if (idx < 0) continue;
++      active[idx].point = p;
++      steps.append({active.size() == 1 ? PointerAction::ACTION_UP
++                                       : PointerAction::ACTION_POINTER_UP,
++                    idx, active});
++      active.remove(idx);
++    }
++  } else {
++    bool moved = false;
++    for (const TouchPointer& p : changed) {
++      const int idx = indexOf(p.id);
++      if (idx < 0) continue;
++      active[idx].point = p;
++      moved = true;
++    }
++    if (moved) steps.append({PointerAction::ACTION_MOVED, 0, active});
++  }
++  return steps;
++}
++
++aap_protobuf::service::inputsource::message::InputReport createMultiTouchInputReport(
++    const TouchReportStep& step, uint64_t timestamp) {
++  aap_protobuf::service::inputsource::message::InputReport inputReport;
++  inputReport.set_timestamp(timestamp == 0 ? getCurrentTimestampMicros() : timestamp);
++
++  auto* touchEvent = inputReport.mutable_touch_event();
++  for (const ActiveTouchPointer& a : step.pointers) {
++    auto* pointerData = touchEvent->add_pointer_data();
++    pointerData->set_x(static_cast<uint32_t>(a.point.x));
++    pointerData->set_y(static_cast<uint32_t>(a.point.y));
++    pointerData->set_pointer_id(static_cast<uint32_t>(a.slot));
++  }
++  touchEvent->set_action(step.action);
++  touchEvent->set_action_index(static_cast<uint32_t>(step.actionIndex));
++  return inputReport;
++}
++
+ aap_protobuf::service::inputsource::message::InputReport createKeyInputReport(
+     int keyCode, KeyAction action, uint64_t timestamp, bool longPress, int metaState) {
+   // Create InputReport message
+diff --git a/src/services/android_auto/ProtocolHelpers.h b/src/services/android_auto/ProtocolHelpers.h
+index a56785a..8ccd33d 100644
+--- a/src/services/android_auto/ProtocolHelpers.h
++++ b/src/services/android_auto/ProtocolHelpers.h
+@@ -27,8 +27,11 @@
+ 
+ #include <aasdk/Common/Data.hpp>
+ 
++#include <QVector>
+ #include <cstdint>
+ 
++#include "AndroidAutoService.h"
++
+ namespace crankshaft {
+ namespace protocol {
+ 
+@@ -69,6 +72,40 @@ enum class AudioFocusState {
+ aap_protobuf::service::inputsource::message::InputReport createTouchInputReport(
+    uint32_t x, uint32_t y, TouchAction action, int pointerId = 0, uint64_t timestamp = 0);
+ 
++/**
++ * @brief A finger on screen: UI id plus the small, stable slot sent to the phone
++ * as pointer_id (Qt touch ids can be huge; Android expects 0..9).
++ */
++struct ActiveTouchPointer {
++  TouchPointer point;
++  int slot{0};
++};
++
++/**
++ * @brief One multi-touch report to send: every active finger plus what happened.
++ */
++struct TouchReportStep {
++  aap_protobuf::service::inputsource::message::PointerAction action;
++  int actionIndex{0};                     // index in pointers of the finger that went down/up
++  QVector<ActiveTouchPointer> pointers;   // all fingers on screen at this moment
++};
++
++/**
++ * @brief Turn the fingers that changed in one UI event into the AA reports to send.
++ *
++ * Updates @p active (fingers on screen, press order). A second finger going down
++ * yields ACTION_POINTER_DOWN, the last finger lifting yields ACTION_UP, etc.
++ * @param action 0=down, 1=up/cancel, 2=move (same as sendTouchInput)
++ */
++QVector<TouchReportStep> buildTouchReportSteps(QVector<ActiveTouchPointer>& active,
++                                               const QVector<TouchPointer>& changed, int action);
++
++/**
++ * @brief Create a multi-touch input report from one step.
++ */
++aap_protobuf::service::inputsource::message::InputReport createMultiTouchInputReport(
++    const TouchReportStep& step, uint64_t timestamp = 0);
++
+ /**
+  * @brief Create a key input report message
+  * @param keyCode Android KeyEvent keycode
+diff --git a/src/services/android_auto/RealAndroidAutoService.cpp b/src/services/android_auto/RealAndroidAutoService.cpp
+index 8ac9d0e..304dc63 100644
+--- a/src/services/android_auto/RealAndroidAutoService.cpp
++++ b/src/services/android_auto/RealAndroidAutoService.cpp
+@@ -1073,8 +1073,9 @@ static void appendSensorSourceFeature(
+       aap_protobuf::service::sensorsource::message::SensorType::SENSOR_DRIVING_STATUS_DATA);
+   sensorService->add_sensors()->set_sensor_type(
+       aap_protobuf::service::sensorsource::message::SensorType::SENSOR_LOCATION);
+-  sensorService->add_sensors()->set_sensor_type(
+-      aap_protobuf::service::sensorsource::message::SensorType::SENSOR_NIGHT_MODE);
++  // SENSOR_NIGHT_MODE is deliberately not advertised: the head unit has no light
++  // sensor and no reliable clock (Pi 3B has no RTC) and used to pin AA to "day".
++  // Without it the phone picks day/night from its own clock and location.
+ }
+ 
+ static void appendBluetoothFeature(
+@@ -4168,6 +4169,7 @@ void RealAndroidAutoService::cleanupChannels() {
+   m_speechAudioChannel.reset();
+   m_telephonyAudioChannel.reset();
+   m_inputChannel.reset();
++  m_activePointers.clear();
+   m_microphoneChannel.reset();
+   m_sensorChannel.reset();
+   m_bluetoothChannel.reset();
+@@ -4758,6 +4760,57 @@ bool RealAndroidAutoService::sendTouchInput(int x, int y, int action) {
+   }
+ }
+ 
++bool RealAndroidAutoService::sendMultiTouchInput(const QVector<TouchPointer>& points, int action) {
++  if (!isConnected() || !m_inputChannel) {
++    m_activePointers.clear();  // a new session must not inherit fingers from the old one
++    Logger::instance().warning("Cannot send touch input: not connected or input channel disabled");
++    return false;
++  }
++
++  try {
++    using namespace crankshaft::protocol;
++
++    // Same coordinate space as sendTouchInput (advertised INPUT_SOURCE resolution).
++    QVector<TouchPointer> bounded = points;
++    for (TouchPointer& p : bounded) {
++      p.x = qBound(0, p.x, qMax(0, m_resolution.width() - 1));
++      p.y = qBound(0, p.y, qMax(0, m_resolution.height() - 1));
++    }
++
++    const auto steps = buildTouchReportSteps(m_activePointers, bounded, action);
++    for (const TouchReportStep& step : steps) {
++      auto data = createMultiTouchInputReport(step);
++      const quint64 reportNumber = ++m_touchInputCount;
++      Logger::instance().debug(QString("[AA][touch] multi report #%1 action=%2 index=%3 pointers=%4")
++                                   .arg(reportNumber)
++                                   .arg(static_cast<int>(step.action))
++                                   .arg(step.actionIndex)
++                                   .arg(step.pointers.size()));
++
++      auto promise = aasdk::channel::SendPromise::defer(*m_strand);
++      promise->then(
++          []() {},
++          [self = QPointer<RealAndroidAutoService>(this), reportNumber](
++              const aasdk::error::Error& error) {
++            const QString errorText = QString::fromStdString(error.what());
++            Logger::instance().warning(
++                QString("[AA][touch] multi report #%1 send FAILED: %2").arg(reportNumber).arg(errorText));
++            if (self &&
++                (isSslWrapperNoDeviceErrorText(errorText) ||
++                 isTransportNoDeviceErrorText(errorText) ||
++                 isUsbTransferNoDeviceErrorText(errorText))) {
++              self->onChannelError(QStringLiteral("input"), errorText);
++            }
++          });
++      m_inputChannel->sendInputReport(data, std::move(promise));
++    }
++    return true;
++  } catch (const std::exception& e) {
++    Logger::instance().error(QString("Failed to send multi-touch input: %1").arg(e.what()));
++    return false;
++  }
++}
++
+ bool RealAndroidAutoService::sendKeyInput(int key_code, int action) {
+   if (!isConnected() || !m_inputChannel) {
+     Logger::instance().warning("Cannot send key input: not connected or input channel disabled");
+diff --git a/src/services/android_auto/RealAndroidAutoService.h b/src/services/android_auto/RealAndroidAutoService.h
+index b3a7166..54774d8 100644
+--- a/src/services/android_auto/RealAndroidAutoService.h
++++ b/src/services/android_auto/RealAndroidAutoService.h
+@@ -30,6 +30,7 @@ class QTimer;
+ #include "../../hal/multimedia/IAudioMixer.h"
+ #include "../../hal/multimedia/IVideoDecoder.h"
+ #include "AndroidAutoService.h"
++#include "ProtocolHelpers.h"
+ 
+ // Forward declarations
+ class SessionStore;
+@@ -181,6 +182,7 @@ class RealAndroidAutoService : public AndroidAutoService {
+   }
+ 
+   bool sendTouchInput(int x, int y, int action) override;
++  bool sendMultiTouchInput(const QVector<TouchPointer>& points, int action) override;
+   bool sendKeyInput(int key_code, int action) override;
+ 
+   bool requestAudioFocus() override;
+@@ -388,6 +390,8 @@ class RealAndroidAutoService : public AndroidAutoService {
+   quint64 m_videoEncodedEmitCount{0};
+   QElapsedTimer m_lastVideoEncodedEmitTimer;
+   quint64 m_touchInputCount{0};
++  // Fingers currently on the screen, in press order (AA needs every active pointer per report).
++  QVector<crankshaft::protocol::ActiveTouchPointer> m_activePointers;
+ 
+   quint64 m_videoDecodeSubmitCount{0};
+   quint64 m_videoDecodeRejectCount{0};
+diff --git a/src/services/websocket/WebSocketServer.cpp b/src/services/websocket/WebSocketServer.cpp
+index 013ed6a..df357a1 100644
+--- a/src/services/websocket/WebSocketServer.cpp
++++ b/src/services/websocket/WebSocketServer.cpp
+@@ -606,31 +606,41 @@ void WebSocketServer::handlePublish(const QString& topic, const QVariantMap& pay
+                 .arg(QString::fromUtf8(QJsonDocument(QJsonObject::fromVariantMap(payload)).toJson(QJsonDocument::Compact)))
+                 .arg(displayResolution.width())
+                 .arg(displayResolution.height()));
++        // Coordinates in [0,1] are normalised; anything else is already in display pixels.
++        auto mapCoord = [](double raw, int size) {
++          const int value = (raw >= 0.0 && raw <= 1.0) ? static_cast<int>(raw * size)
++                                                       : static_cast<int>(raw);
++          return qBound(0, value, qMax(0, size - 1));
++        };
+         const double rawX = payload.value(QStringLiteral("x")).toDouble();
+         const double rawY = payload.value(QStringLiteral("y")).toDouble();
+-
+-        int x = static_cast<int>(rawX);
+-        int y = static_cast<int>(rawY);
+-
+-        if (rawX >= 0.0 && rawX <= 1.0) {
+-          x = static_cast<int>(rawX * static_cast<double>(displayResolution.width()));
+-        }
+-        if (rawY >= 0.0 && rawY <= 1.0) {
+-          y = static_cast<int>(rawY * static_cast<double>(displayResolution.height()));
+-        }
+-
+-        x = qBound(0, x, qMax(0, displayResolution.width() - 1));
+-        y = qBound(0, y, qMax(0, displayResolution.height() - 1));
++        const int x = mapCoord(rawX, displayResolution.width());
++        const int y = mapCoord(rawY, displayResolution.height());
+ 
+         const QString actionName = payload.value(QStringLiteral("action")).toString();
+         int action = 2;
+         if (actionName == QStringLiteral("down") || actionName == QStringLiteral("press")) {
+           action = 0;
+-        } else if (actionName == QStringLiteral("up") || actionName == QStringLiteral("release")) {
++        } else if (actionName == QStringLiteral("up") || actionName == QStringLiteral("release") ||
++                   actionName == QStringLiteral("cancel")) {
+           action = 1;
+         }
+ 
+-        const bool accepted = aaService->sendTouchInput(x, y, action);
++        // Multi-touch UIs send every changed finger in "points"; older UIs only x/y.
++        const QVariantList rawPoints = payload.value(QStringLiteral("points")).toList();
++        bool accepted = false;
++        if (!rawPoints.isEmpty()) {
++          QVector<TouchPointer> points;
++          for (const QVariant& rawPoint : rawPoints) {
++            const QVariantMap p = rawPoint.toMap();
++            points.append({p.value(QStringLiteral("id")).toInt(),
++                           mapCoord(p.value(QStringLiteral("x")).toDouble(), displayResolution.width()),
++                           mapCoord(p.value(QStringLiteral("y")).toDouble(), displayResolution.height())});
++          }
++          accepted = aaService->sendMultiTouchInput(points, action);
++        } else {
++          accepted = aaService->sendTouchInput(x, y, action);
++        }
+         Logger::instance().info(
+             QString("[WebSocketServer] AA touch dispatch #%1: raw=%2,%3 mapped=%4,%5 "
+                     "actionName=%6 action=%7 accepted=%8")
+diff --git a/src/tests/CMakeLists.txt b/src/tests/CMakeLists.txt
+index ef7af83..eb246dc 100644
+--- a/src/tests/CMakeLists.txt
++++ b/src/tests/CMakeLists.txt
+@@ -6,6 +6,7 @@ add_executable(crankshaft-core-tests
+     test_aasdk_error_classification.cpp
+     test_android_auto_transport_mode.cpp
+     test_websocket_client_contract.cpp
++    test_touch_report_steps.cpp
+ )
+ 
+ target_include_directories(crankshaft-core-tests PRIVATE
+diff --git a/src/tests/test_touch_report_steps.cpp b/src/tests/test_touch_report_steps.cpp
+new file mode 100644
+index 0000000..c445370
+--- /dev/null
++++ b/src/tests/test_touch_report_steps.cpp
+@@ -0,0 +1,80 @@
++/*
++ * Project: Crankshaft
++ * This file is part of Crankshaft project.
++ *
++ *  Crankshaft is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation; either version 3 of the License, or
++ *  (at your option) any later version.
++ */
++
++// Multi-touch (pinch-zoom): the fingers that change in each UI event must become
++// Android-style reports carrying every finger on screen.
++
++#include <gtest/gtest.h>
++
++#include "../services/android_auto/ProtocolHelpers.h"
++
++using namespace crankshaft::protocol;
++using aap_protobuf::service::inputsource::message::PointerAction;
++
++TEST(TouchReportSteps, PinchSequence) {
++  QVector<ActiveTouchPointer> active;
++
++  // First finger (Qt ids can be huge) -> DOWN, slot 0.
++  auto s = buildTouchReportSteps(active, {{16777217, 100, 100}}, 0);
++  ASSERT_EQ(s.size(), 1);
++  EXPECT_EQ(s[0].action, PointerAction::ACTION_DOWN);
++  EXPECT_EQ(s[0].pointers.size(), 1);
++  EXPECT_EQ(s[0].pointers[0].slot, 0);
++
++  // Second finger -> POINTER_DOWN at index 1, both fingers in the report.
++  s = buildTouchReportSteps(active, {{16777218, 300, 300}}, 0);
++  ASSERT_EQ(s.size(), 1);
++  EXPECT_EQ(s[0].action, PointerAction::ACTION_POINTER_DOWN);
++  EXPECT_EQ(s[0].actionIndex, 1);
++  EXPECT_EQ(s[0].pointers.size(), 2);
++  EXPECT_EQ(s[0].pointers[1].slot, 1);
++
++  // Only one finger reported as moved -> one MOVE with both, the other keeps its position.
++  s = buildTouchReportSteps(active, {{16777218, 350, 350}}, 2);
++  ASSERT_EQ(s.size(), 1);
++  EXPECT_EQ(s[0].action, PointerAction::ACTION_MOVED);
++  EXPECT_EQ(s[0].pointers[0].point.x, 100);
++  EXPECT_EQ(s[0].pointers[1].point.x, 350);
++
++  // First finger lifts -> POINTER_UP at index 0; second keeps slot 1.
++  s = buildTouchReportSteps(active, {{16777217, 100, 100}}, 1);
++  ASSERT_EQ(s.size(), 1);
++  EXPECT_EQ(s[0].action, PointerAction::ACTION_POINTER_UP);
++  EXPECT_EQ(s[0].actionIndex, 0);
++  ASSERT_EQ(active.size(), 1);
++  EXPECT_EQ(active[0].slot, 1);
++
++  // Last finger lifts -> UP, nothing left.
++  s = buildTouchReportSteps(active, {{16777218, 350, 350}}, 1);
++  ASSERT_EQ(s.size(), 1);
++  EXPECT_EQ(s[0].action, PointerAction::ACTION_UP);
++  EXPECT_TRUE(active.isEmpty());
++
++  // Protobuf report carries slots as pointer ids and the action index.
++  QVector<ActiveTouchPointer> two;
++  buildTouchReportSteps(two, {{7, 1, 2}}, 0);
++  const auto step = buildTouchReportSteps(two, {{9, 3, 4}}, 0).first();
++  const auto report = createMultiTouchInputReport(step, 1);
++  ASSERT_EQ(report.touch_event().pointer_data_size(), 2);
++  EXPECT_EQ(report.touch_event().pointer_data(1).pointer_id(), 1u);
++  EXPECT_EQ(report.touch_event().action_index(), 1u);
++}
++
++TEST(TouchReportSteps, IgnoresUnknownFingersAndStaleIds) {
++  QVector<ActiveTouchPointer> active;
++  EXPECT_TRUE(buildTouchReportSteps(active, {{5, 0, 0}}, 1).isEmpty());  // up without down
++  EXPECT_TRUE(buildTouchReportSteps(active, {{5, 0, 0}}, 2).isEmpty());  // move without down
++
++  buildTouchReportSteps(active, {{5, 0, 0}}, 0);
++  const auto s = buildTouchReportSteps(active, {{5, 10, 10}}, 0);  // lost release, same id again
++  ASSERT_EQ(s.size(), 1);
++  EXPECT_EQ(s[0].action, PointerAction::ACTION_DOWN);
++  EXPECT_EQ(active.size(), 1);
++}
