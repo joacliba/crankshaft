@@ -44,12 +44,12 @@ jobs:
           mv "$IMG" crankshaft.img
           ls -la crankshaft.img
 
-      - name: Montar imagen (raíz de solo lectura + capa para compilar)
+      - name: Montar imagen (y copia para compilar)
         run: |
           set -euo pipefail
           LOOP=$(sudo losetup -fP --show crankshaft.img)
           echo "LOOP=$LOOP" >> "$GITHUB_ENV"
-          sudo mkdir -p /mnt/img /mnt/build /work/upper /work/wd
+          sudo mkdir -p /mnt/img /mnt/build
           # The root is the partition that holds autoapp.
           for p in "$LOOP"p*; do
             sudo mount -o ro "$p" /mnt/img 2>/dev/null || continue
@@ -57,8 +57,14 @@ jobs:
             sudo umount /mnt/img
           done
           test -f /mnt/img/usr/local/bin/autoapp
-          # Build in an overlay so build deps never land in the image.
-          sudo mount -t overlay overlay -o lowerdir=/mnt/img,upperdir=/work/upper,workdir=/work/wd /mnt/build
+          # Build in a copy so build deps never land in the image. The copy lives on ext4 without
+          # dir_index: with hashed dirs the 64-bit readdir offsets overflow 32-bit ARM programs under
+          # qemu, and cmake's file listing comes back empty (no .proto files, no Boost libs found).
+          sudo truncate -s 16G /mnt/buildroot.img
+          sudo mkfs.ext4 -q -O ^dir_index /mnt/buildroot.img
+          sudo mount -o loop /mnt/buildroot.img /mnt/build
+          sudo cp -a /mnt/img/. /mnt/build/
+          df -h /mnt/build
           sudo cp /usr/bin/qemu-arm-static /mnt/build/usr/bin/
           for d in proc sys dev dev/pts; do sudo mount --bind /$d /mnt/build/$d; done
           sudo rm -f /mnt/build/etc/resolv.conf && sudo cp /etc/resolv.conf /mnt/build/etc/resolv.conf
