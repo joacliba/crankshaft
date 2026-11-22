@@ -10,8 +10,12 @@ FONT=$(fc-match -f '%{file}' 'Inter:style=Light')
 
 # Splash: fills the top 80% of the screen (moderno-splash scales it to fit), black like the screen.
 if [ -n "$LOGO" ] && [ -f "$LOGO" ]; then
+  # Light background around the logo becomes transparent (flood fill from the corner, the
+  # logo's dark outline stops it), so it sits on black.
+  convert "$LOGO" -alpha set -bordercolor white -border 1 -fuzz 12% -fill none -floodfill +0+0 white \
+    -shave 1x1 -trim +repage "$OUT/logo-clean.png"
   convert -size 1600x768 xc:black \
-    \( "$LOGO" -resize 560x400 \) -gravity center -geometry +0-90 -composite \
+    \( "$OUT/logo-clean.png" -resize 560x400 \) -gravity center -geometry +0-90 -composite \
     -font "$FONT" -pointsize 84 -kerning 6 -fill '#EDEFF3' -gravity center -annotate +0+250 "$NAME" \
     "$OUT/splash.png"
 else

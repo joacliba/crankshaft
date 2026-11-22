@@ -37,8 +37,8 @@ jobs:
       - name: Imagenes (arranque y fondos)
         run: |
           set -euo pipefail
-          # The car logo is optional: drop it at moderno/splash/logo.png.
-          bash moderno/splash/make-images.sh img-out moderno/splash/logo.png
+          # The car logo is optional: drop it at moderno/splash/logo.jpg.
+          bash moderno/splash/make-images.sh img-out moderno/splash/logo.jpg
 
       - name: Descargar imagen oficial 20250111
         run: |
