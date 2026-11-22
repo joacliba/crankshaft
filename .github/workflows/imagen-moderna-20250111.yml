@@ -30,9 +30,15 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo apt-get update
-          sudo apt-get install -y qemu-user-static binfmt-support unzip xz-utils
+          sudo apt-get install -y qemu-user-static binfmt-support unzip xz-utils imagemagick fonts-inter
           sudo update-binfmts --enable qemu-arm
           df -h /
+
+      - name: Imagenes (arranque y fondos)
+        run: |
+          set -euo pipefail
+          # The car logo is optional: drop it at moderno/splash/logo.png.
+          bash moderno/splash/make-images.sh img-out moderno/splash/logo.png
 
       - name: Descargar imagen oficial 20250111
         run: |
@@ -72,7 +78,7 @@ jobs:
       - name: Compilar aasdk y OpenAuto (armhf, Buster, Qt 5.15.1 de la imagen)
         run: |
           set -euo pipefail
-          sudo mkdir -p /mnt/build/src && sudo cp moderno/openauto.patch /mnt/build/src/
+          sudo mkdir -p /mnt/build/src && sudo cp moderno/openauto.patch moderno/splash/moderno-splash.c /mnt/build/src/
           sudo tee /mnt/build/src/build.sh > /dev/null <<'EOF'
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
@@ -83,7 +89,11 @@ jobs:
           apt-get -o Acquire::Check-Valid-Until=false update
           apt-get install -y --no-install-recommends build-essential cmake git ca-certificates \
             libboost-all-dev libusb-1.0-0-dev libssl-dev libprotobuf-dev protobuf-compiler \
-            librtaudio-dev libtag1-dev libblkid-dev libgps-dev libraspberrypi-dev libpulse-dev libasound2-dev
+            librtaudio-dev libtag1-dev libblkid-dev libgps-dev libraspberrypi-dev libpulse-dev libasound2-dev \
+            libpng-dev zlib1g-dev console-setup-linux
+          # Boot splash: libpng linked statically so it needs nothing extra in the image.
+          gcc -O2 -Wall -o /src/moderno-splash /src/moderno-splash.c -Wl,-Bstatic -lpng16 -lz -Wl,-Bdynamic -lm
+          zcat /usr/share/consolefonts/Uni2-Terminus16.psf.gz > /src/font.psf
           for l in EGL GLESv2 OpenVG WFC; do ln -sf /opt/vc/lib/libbrcm$l.so /usr/lib/arm-linux-gnueabihf/lib$l.so; done
           make -C /opt/vc/src/hello_pi/libs/ilclient
           cd /src
@@ -103,7 +113,8 @@ jobs:
             OPENAUTO_REPO="$OPENAUTO_REPO" OPENAUTO_COMMIT="$OPENAUTO_COMMIT" bash /src/build.sh
           mkdir -p out
           sudo cp /mnt/build/src/openauto/bin/autoapp /mnt/build/src/openauto/bin/btservice \
-                  /mnt/build/src/aasdk/lib/libaasdk.so /mnt/build/src/aasdk/lib/libaasdk_proto.so out/
+                  /mnt/build/src/aasdk/lib/libaasdk.so /mnt/build/src/aasdk/lib/libaasdk_proto.so \
+                  /mnt/build/src/moderno-splash /mnt/build/src/font.psf out/
           sudo chown -R "$(id -u):$(id -g)" out
 
       - uses: actions/upload-artifact@v4
@@ -130,6 +141,34 @@ jobs:
           sudo sed -i 's/^XKBLAYOUT=.*/XKBLAYOUT="es"/' $R/etc/default/keyboard
           grep XKBLAYOUT $R/etc/default/keyboard
           cat $R/usr/local/bin/autoapp.md5
+
+          # Boot splash: our screen replaces plymouth; openauto stops it right before X starts.
+          sudo install -m 755 out/moderno-splash $R/usr/local/bin/
+          sudo install -d $R/usr/share/moderno
+          sudo install -m 644 out/font.psf img-out/splash.png $R/usr/share/moderno/
+          sudo install -m 644 moderno/splash/moderno-splash.service $R/etc/systemd/system/
+          sudo install -d $R/etc/systemd/system/sysinit.target.wants $R/etc/systemd/system/openauto.service.d
+          sudo ln -sf /etc/systemd/system/moderno-splash.service $R/etc/systemd/system/sysinit.target.wants/moderno-splash.service
+          printf '[Service]\nExecStartPre=+-/bin/systemctl stop moderno-splash.service\n' | sudo tee $R/etc/systemd/system/openauto.service.d/moderno-splash.conf > /dev/null
+          for u in plymouth-start plymouth-read-write plymouth-quit plymouth-quit-wait; do
+            sudo ln -sf /dev/null $R/etc/systemd/system/$u.service
+          done
+
+          # Boot partition: no plymouth splash, new wallpapers.
+          sudo mkdir -p /mnt/boot
+          for p in "$LOOP"p*; do
+            [ "$p" = "$ROOTPART" ] && continue
+            sudo mount "$p" /mnt/boot 2>/dev/null || continue
+            if [ -f /mnt/boot/cmdline.txt ]; then break; fi
+            sudo umount /mnt/boot
+          done
+          test -f /mnt/boot/cmdline.txt
+          sudo sed -i 's/ splash\b//' /mnt/boot/cmdline.txt
+          cat /mnt/boot/cmdline.txt
+          sudo install -d /mnt/boot/crankshaft
+          sudo cp img-out/wallpaper.png img-out/wallpaper-night.png /mnt/boot/crankshaft/
+          ls -la /mnt/boot/crankshaft | head -40
+          sudo umount /mnt/boot
           sudo umount /mnt/img
           sudo losetup -d "$LOOP"
 

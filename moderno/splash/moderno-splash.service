@@ -1,0 +1,12 @@
+[Unit]
+Description=Moderno boot splash (logo + boot log)
+DefaultDependencies=no
+After=systemd-journald.service
+Before=sysinit.target
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'journalctl -b -f -n 30 -o short-monotonic | /usr/local/bin/moderno-splash /usr/share/moderno/splash.png /usr/share/moderno/font.psf'
+
+[Install]
+WantedBy=sysinit.target
