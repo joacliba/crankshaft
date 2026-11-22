@@ -15,9 +15,9 @@ on:
 env:
   IMAGE_URL: https://github.com/opencardev/crankshaft/releases/download/20250111/20250111-Debian_buster-armhf.zip
   AASDK_REPO: https://github.com/SonOfGib/aasdk.git
-  AASDK_COMMIT: 288e894
+  AASDK_COMMIT: "288e894"
   OPENAUTO_REPO: https://github.com/opencardev/openauto.git
-  OPENAUTO_COMMIT: 1a74e9f
+  OPENAUTO_COMMIT: "1a74e9f"
 
 jobs:
   imagen:
