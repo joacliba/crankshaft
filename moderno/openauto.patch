@@ -1,0 +1,458 @@
+diff --git a/include/f1x/openauto/autoapp/Projection/InputDevice.hpp b/include/f1x/openauto/autoapp/Projection/InputDevice.hpp
+index b6197a1..67e449e 100644
+--- a/include/f1x/openauto/autoapp/Projection/InputDevice.hpp
++++ b/include/f1x/openauto/autoapp/Projection/InputDevice.hpp
+@@ -20,6 +20,8 @@
+ 
+ #include <QObject>
+ #include <QKeyEvent>
++#include <QTouchEvent>
++#include <map>
+ #include <f1x/openauto/autoapp/Projection/IInputDevice.hpp>
+ #include <f1x/openauto/autoapp/Configuration/IConfiguration.hpp>
+ 
+@@ -51,6 +53,10 @@ private:
+     bool handleKeyEvent(QEvent* event, QKeyEvent* key);
+     void dispatchKeyEvent(ButtonEvent event);
+     bool handleTouchEvent(QEvent* event);
++    bool handleTouchscreenEvent(QTouchEvent* touch);
++    TouchPointer toPointer(const QTouchEvent::TouchPoint& point);
++
++    std::map<int, uint32_t> touchSlots_;  // Qt touch id -> small stable pointer id for Android
+ 
+     QObject& parent_;
+     configuration::IConfiguration::Pointer configuration_;
+diff --git a/include/f1x/openauto/autoapp/Projection/InputEvent.hpp b/include/f1x/openauto/autoapp/Projection/InputEvent.hpp
+index db47442..f891c19 100644
+--- a/include/f1x/openauto/autoapp/Projection/InputEvent.hpp
++++ b/include/f1x/openauto/autoapp/Projection/InputEvent.hpp
+@@ -21,6 +21,7 @@
+ #include <aasdk_proto/ButtonCodeEnum.pb.h>
+ #include <aasdk_proto/TouchActionEnum.pb.h>
+ #include <aasdk/IO/Promise.hpp>
++#include <vector>
+ 
+ namespace f1x
+ {
+@@ -52,12 +53,23 @@ struct ButtonEvent
+     aasdk::proto::enums::ButtonCode::Enum code;
+ };
+ 
++struct TouchPointer
++{
++    uint32_t x;
++    uint32_t y;
++    uint32_t id;
++};
++
+ struct TouchEvent
+ {
+     aasdk::proto::enums::TouchAction::Enum type;
+     uint32_t x;
+     uint32_t y;
+     uint32_t pointerId;
++    // Multi-touch: every finger on screen and the index of the one that went down/up.
++    // Empty for single-touch (mouse) events, which use x/y above.
++    std::vector<TouchPointer> pointers = {};
++    uint32_t actionIndex = 0;
+ };
+ 
+ }
+diff --git a/src/autoapp/App.cpp b/src/autoapp/App.cpp
+index b016ea2..c3a6c5d 100644
+--- a/src/autoapp/App.cpp
++++ b/src/autoapp/App.cpp
+@@ -262,6 +262,15 @@ void App::onAndroidAutoQuit()
+             } catch (...) {
+                 OPENAUTO_LOG(error) << "[App] onAndroidAutoQuit: exception caused by this->waitForDevice();";
+             }
++            // A phone still plugged in (already in accessory mode) never "arrives" again on the hub,
++            // so query connected devices too, like the manual start does. Avoids unplug/replug.
++            if (!disableAutostartEntity) {
++                try {
++                    this->enumerateDevices();
++                } catch (...) {
++                    OPENAUTO_LOG(error) << "[App] onAndroidAutoQuit: exception caused by this->enumerateDevices();";
++                }
++            }
+         }
+     });
+ }
+diff --git a/src/autoapp/Projection/InputDevice.cpp b/src/autoapp/Projection/InputDevice.cpp
+index 8bf0e5a..ba6c481 100644
+--- a/src/autoapp/Projection/InputDevice.cpp
++++ b/src/autoapp/Projection/InputDevice.cpp
+@@ -16,6 +16,7 @@
+ *  along with openauto. If not, see <http://www.gnu.org/licenses/>.
+ */
+ 
++#include <algorithm>
+ #include <f1x/openauto/Common/Log.hpp>
+ #include <f1x/openauto/autoapp/Projection/IInputDeviceEventHandler.hpp>
+ #include <f1x/openauto/autoapp/Projection/InputDevice.hpp>
+@@ -55,6 +56,7 @@ void InputDevice::stop()
+     OPENAUTO_LOG(info) << "[InputDevice] stop.";
+     parent_.removeEventFilter(this);
+     eventHandler_ = nullptr;
++    touchSlots_.clear();
+ }
+ 
+ bool InputDevice::eventFilter(QObject* obj, QEvent* event)
+@@ -71,6 +73,12 @@ bool InputDevice::eventFilter(QObject* obj, QEvent* event)
+                 return this->handleKeyEvent(event, key);
+             }
+         }
++        else if((event->type() == QEvent::TouchBegin || event->type() == QEvent::TouchUpdate ||
++                 event->type() == QEvent::TouchEnd || event->type() == QEvent::TouchCancel) && obj->isWindowType())
++        {
++            // Window level only: the app-wide filter would otherwise see the event twice.
++            return this->handleTouchscreenEvent(static_cast<QTouchEvent*>(event));
++        }
+         else if(event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease || event->type() == QEvent::MouseMove)
+         {
+             return this->handleTouchEvent(event);
+@@ -221,6 +229,87 @@ bool InputDevice::handleTouchEvent(QEvent* event)
+     return true;
+ }
+ 
++TouchPointer InputDevice::toPointer(const QTouchEvent::TouchPoint& point)
++{
++    const uint32_t x = (static_cast<float>(point.pos().x()) / touchscreenGeometry_.width()) * displayGeometry_.width();
++    const uint32_t y = (static_cast<float>(point.pos().y()) / touchscreenGeometry_.height()) * displayGeometry_.height();
++    return {x, y, touchSlots_[point.id()]};
++}
++
++// Real multi-touch (pinch-zoom). Android expects every report to list all fingers on screen,
++// with PRESS/RELEASE for the first/last finger and POINTER_DOWN/UP for the others.
++bool InputDevice::handleTouchscreenEvent(QTouchEvent* touch)
++{
++    touch->accept();  // handled here: Qt must not also synthesize mouse events for it
++    if(!configuration_->getTouchscreenEnabled())
++    {
++        return true;
++    }
++
++    const bool cancel = touch->type() == QEvent::TouchCancel;
++    std::vector<QTouchEvent::TouchPoint> active;  // fingers already down before this event
++    for(const auto& point : touch->touchPoints())
++    {
++        if(point.state() != Qt::TouchPointPressed && touchSlots_.count(point.id()) > 0)
++        {
++            active.push_back(point);
++        }
++    }
++
++    auto send = [this, &active](aasdk::proto::enums::TouchAction::Enum type, size_t index) {
++        TouchEvent event{type, 0, 0, 0};
++        for(const auto& point : active)
++        {
++            event.pointers.push_back(this->toPointer(point));
++        }
++        event.x = event.pointers[index].x;
++        event.y = event.pointers[index].y;
++        event.pointerId = event.pointers[index].id;
++        event.actionIndex = static_cast<uint32_t>(index);
++        eventHandler_->onTouchEvent(event);
++    };
++
++    bool moved = false;
++    for(const auto& point : touch->touchPoints())
++    {
++        if(point.state() == Qt::TouchPointPressed && !cancel)
++        {
++            uint32_t slot = 0;
++            while(std::any_of(touchSlots_.begin(), touchSlots_.end(), [slot](const auto& entry) { return entry.second == slot; }))
++            {
++                ++slot;
++            }
++            touchSlots_[point.id()] = slot;
++            active.push_back(point);
++            send(active.size() == 1 ? aasdk::proto::enums::TouchAction::PRESS
++                                    : aasdk::proto::enums::TouchAction::POINTER_DOWN, active.size() - 1);
++        }
++        moved = moved || point.state() == Qt::TouchPointMoved;
++    }
++
++    if(moved && !active.empty())
++    {
++        send(aasdk::proto::enums::TouchAction::DRAG, 0);
++    }
++
++    for(size_t i = 0; i < active.size();)
++    {
++        if(cancel || active[i].state() == Qt::TouchPointReleased)
++        {
++            send(active.size() == 1 ? aasdk::proto::enums::TouchAction::RELEASE
++                                    : aasdk::proto::enums::TouchAction::POINTER_UP, i);
++            touchSlots_.erase(active[i].id());
++            active.erase(active.begin() + i);
++        }
++        else
++        {
++            ++i;
++        }
++    }
++
++    return true;
++}
++
+ bool InputDevice::hasTouchscreen() const
+ {
+     return configuration_->getTouchscreenEnabled();
+diff --git a/src/autoapp/Service/AndroidAutoEntity.cpp b/src/autoapp/Service/AndroidAutoEntity.cpp
+index de11e9b..46003f2 100644
+--- a/src/autoapp/Service/AndroidAutoEntity.cpp
++++ b/src/autoapp/Service/AndroidAutoEntity.cpp
+@@ -60,7 +60,7 @@ void AndroidAutoEntity::start(IAndroidAutoEntityEventHandler& eventHandler)
+ 
+         eventHandler_ = eventHandler;
+         std::for_each(serviceList_.begin(), serviceList_.end(), std::bind(&IService::start, std::placeholders::_1));
+-        //this->schedulePing();
++        this->schedulePing();
+ 
+         auto versionRequestPromise = aasdk::channel::SendPromise::defer(strand_);
+         versionRequestPromise->then([]() {}, std::bind(&AndroidAutoEntity::onChannelError, this->shared_from_this(), std::placeholders::_1));
+@@ -77,7 +77,7 @@ void AndroidAutoEntity::stop()
+         try {
+             eventHandler_ = nullptr;
+             std::for_each(serviceList_.begin(), serviceList_.end(), std::bind(&IService::stop, std::placeholders::_1));
+-            //pinger_->cancel();
++            pinger_->cancel();
+             messenger_->stop();
+             transport_->stop();
+             cryptor_->deinit();
+diff --git a/src/autoapp/Service/InputService.cpp b/src/autoapp/Service/InputService.cpp
+index f038bb6..5ee4365 100644
+--- a/src/autoapp/Service/InputService.cpp
++++ b/src/autoapp/Service/InputService.cpp
+@@ -188,10 +188,24 @@ void InputService::onTouchEvent(const projection::TouchEvent& event)
+ 
+         auto touchEvent = inputEventIndication.mutable_touch_event();
+         touchEvent->set_touch_action(event.type);
+-        auto touchLocation = touchEvent->add_touch_location();
+-        touchLocation->set_x(event.x);
+-        touchLocation->set_y(event.y);
+-        touchLocation->set_pointer_id(0);
++        if(event.pointers.empty())
++        {
++            auto touchLocation = touchEvent->add_touch_location();
++            touchLocation->set_x(event.x);
++            touchLocation->set_y(event.y);
++            touchLocation->set_pointer_id(0);
++        }
++        else
++        {
++            for(const auto& pointer : event.pointers)
++            {
++                auto touchLocation = touchEvent->add_touch_location();
++                touchLocation->set_x(pointer.x);
++                touchLocation->set_y(pointer.y);
++                touchLocation->set_pointer_id(pointer.id);
++            }
++            touchEvent->set_action_index(event.actionIndex);
++        }
+ 
+         auto promise = aasdk::channel::SendPromise::defer(strand_);
+         promise->then([]() {}, std::bind(&InputService::onChannelError, this->shared_from_this(), std::placeholders::_1));
+diff --git a/src/autoapp/Service/Pinger.cpp b/src/autoapp/Service/Pinger.cpp
+index 0d7ae56..99ad06e 100644
+--- a/src/autoapp/Service/Pinger.cpp
++++ b/src/autoapp/Service/Pinger.cpp
+@@ -78,7 +78,9 @@ void Pinger::onTimerExceeded(const boost::system::error_code& error)
+     {
+         promise_->reject(aasdk::error::Error(aasdk::error::ErrorCode::OPERATION_ABORTED));
+     }
+-    else if(pingsCount_ - pongsCount_ > 4)
++    // Only phones that have answered at least once can be declared dead: some never
++    // answer head-unit pings, and those must not be disconnected every 25 s.
++    else if(pongsCount_ > 0 && pingsCount_ - pongsCount_ > 4)
+     {
+         promise_->reject(aasdk::error::Error());
+     }
+diff --git a/src/autoapp/Service/SensorService.cpp b/src/autoapp/Service/SensorService.cpp
+index e4348a4..2ffed3a 100644
+--- a/src/autoapp/Service/SensorService.cpp
++++ b/src/autoapp/Service/SensorService.cpp
+@@ -104,7 +104,12 @@ void SensorService::fillFeatures(aasdk::proto::messages::ServiceDiscoveryRespons
+     auto* sensorChannel = channelDescriptor->mutable_sensor_channel();
+     sensorChannel->add_sensors()->set_type(aasdk::proto::enums::SensorType::DRIVING_STATUS);
+     sensorChannel->add_sensors()->set_type(aasdk::proto::enums::SensorType::LOCATION);
+-    sensorChannel->add_sensors()->set_type(aasdk::proto::enums::SensorType::NIGHT_DATA);
++    // By default the phone picks day/night from its own clock. Creating
++    // /boot/crankshaft/car_daynight restores Crankshaft's sensor/schedule control.
++    if(is_file_exist("/boot/crankshaft/car_daynight"))
++    {
++        sensorChannel->add_sensors()->set_type(aasdk::proto::enums::SensorType::NIGHT_DATA);
++    }
+ }
+ 
+ void SensorService::onChannelOpenRequest(const aasdk::proto::messages::ChannelOpenRequest& request)
+diff --git a/src/autoapp/UI/MainWindow.cpp b/src/autoapp/UI/MainWindow.cpp
+index 7a3166c..a529369 100644
+--- a/src/autoapp/UI/MainWindow.cpp
++++ b/src/autoapp/UI/MainWindow.cpp
+@@ -533,25 +533,11 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
+     ui_->comboBoxAlbum->hide();
+     ui_->pushButtonAlbum->hide();
+ 
+-    MainWindow::scanFolders();
+-    ui_->comboBoxAlbum->setCurrentText(QString::fromStdString(configuration->getMp3SubFolder()));
+-    MainWindow::scanFiles();
+-    player->setPlaylist(this->playlist);
+-    ui_->mp3List->setCurrentRow(configuration->getMp3Track());
+-    this->currentPlaylistIndex = configuration->getMp3Track();
+-
+-    if (configuration->mp3AutoPlay()) {
+-        MainWindow::playerShow();
+-        MainWindow::playerHide();
+-        MainWindow::on_pushButtonPlayerPlayList_clicked();
+-        if (configuration->showAutoPlay()) {
+-            MainWindow::playerShow();
+-        }
+-    }
+-
++    // Moderno: no local music player. Audio comes from the phone; USB drives are not scanned
++    // for music and the player buttons stay hidden.
++    ui_->pushButtonMusic->hide();
++    ui_->pushButtonMusic2->hide();
+     watcher = new QFileSystemWatcher(this);
+-    watcher->addPath("/media/USBDRIVES");
+-    connect(watcher, &QFileSystemWatcher::directoryChanged, this, &MainWindow::setTrigger);
+ 
+     watcher_tmp = new QFileSystemWatcher(this);
+     watcher_tmp->addPath("/tmp");
+@@ -781,54 +767,54 @@ void f1x::openauto::autoapp::ui::MainWindow::updateAlpha()
+         this->alpha_current_str = value;
+         double alpha = value/100.0;
+         QString alp=QString::number(alpha);
+-        ui_->pushButtonExit->setStyleSheet( "QPushButton{background-color: rgba(164, 0, 0, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonShutdown->setStyleSheet( "QPushButton{background-color: rgba(239, 41, 41, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonReboot->setStyleSheet( "QPushButton{background-color: rgba(252, 175, 62, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonCancel->setStyleSheet( "QPushButton{background-color: rgba(32, 74, 135, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonBrightness->setStyleSheet( "QPushButton{background-color: rgba(245, 121, 0, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonVolume->setStyleSheet( "QPushButton{background-color: rgba(64, 191, 191, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonLock->setStyleSheet( "QPushButton{background-color: rgba(15, 54, 5, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonSettings->setStyleSheet( "QPushButton{background-color: rgba(138, 226, 52, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonDay->setStyleSheet( "QPushButton{background: rgba(252, 233, 79, " + alp + " );  outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonNight->setStyleSheet( "QPushButton{background-color: rgba(114, 159, 207, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonCameraShow->setStyleSheet( "QPushButton{background-color: rgba(100, 62, 4, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonWifi->setStyleSheet( "QPushButton{background-color: rgba(252, 175, 62, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonToggleGUI->setStyleSheet( "QPushButton{background-color: rgba(237, 164, 255, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButton_c1->setStyleSheet( "QPushButton{background-color: rgba(" + this->custom_button_color_c1 + ", " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButton_c2->setStyleSheet( "QPushButton{background-color: rgba(" + this->custom_button_color_c2 + ", " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButton_c3->setStyleSheet( "QPushButton{background-color: rgba(" + this->custom_button_color_c3 + ", " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButton_c4->setStyleSheet( "QPushButton{background-color: rgba(" + this->custom_button_color_c4 + ", " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButton_c5->setStyleSheet( "QPushButton{background-color: rgba(" + this->custom_button_color_c5 + ", " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButton_c6->setStyleSheet( "QPushButton{background-color: rgba(" + this->custom_button_color_c6 + ", " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonDummy1->setStyleSheet( "QPushButton{background-color: rgba(186, 189, 182, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonDummy2->setStyleSheet( "QPushButton{background-color: rgba(186, 189, 182, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonDummy3->setStyleSheet( "QPushButton{background-color: rgba(186, 189, 182, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonDebug->setStyleSheet( "QPushButton{background-color: rgba(85, 87, 83, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonMusic->setStyleSheet( "QPushButton{background-color: rgba(78, 154, 6, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 4px; border: 2px solid rgba(255,255,255,0.5); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->pushButtonAndroidAuto->setStyleSheet( "QPushButton{background-color: rgba(48, 140, 198, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border: 2px solid rgba(255,255,255,0.5); color: rgb(255,255,255); border-bottom: 0px; border-top: 0px;} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
+-        ui_->labelAndroidAutoBottom->setStyleSheet( "background-color: rgba(48, 140, 198, " + alp + " ); border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; border: 2px solid rgba(255,255,255,0.5); color: rgb(255,255,255); border-top: 0px;");
+-        ui_->labelAndroidAutoTop->setStyleSheet( "background-color: rgba(48, 140, 198, " + alp + " ); border-top-left-radius: 4px; border-top-right-radius: 4px; border: 2px solid rgba(255,255,255,0.5); color: rgb(255,255,255); border-bottom: 0px;");
+-        ui_->pushButtonNoDevice->setStyleSheet( "background-color: rgba(48, 140, 198, " + alp + " ); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5); color: rgb(255,255,255);");
+-        ui_->pushButtonNoWiFiDevice->setStyleSheet( "background-color: rgba(252, 175, 62, " + alp + " ); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5); color: rgb(255,255,255);");
++        ui_->pushButtonExit->setStyleSheet( "QPushButton{background-color: rgba(217, 48, 37, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonShutdown->setStyleSheet( "QPushButton{background-color: rgba(217, 48, 37, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonReboot->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonCancel->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonBrightness->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonVolume->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonLock->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonSettings->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonDay->setStyleSheet( "QPushButton{background: rgba(38, 42, 51, " + alp + " );  outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonNight->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonCameraShow->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonWifi->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonToggleGUI->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButton_c1->setStyleSheet( "QPushButton{background-color: rgba(" + this->custom_button_color_c1 + ", " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButton_c2->setStyleSheet( "QPushButton{background-color: rgba(" + this->custom_button_color_c2 + ", " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButton_c3->setStyleSheet( "QPushButton{background-color: rgba(" + this->custom_button_color_c3 + ", " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButton_c4->setStyleSheet( "QPushButton{background-color: rgba(" + this->custom_button_color_c4 + ", " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButton_c5->setStyleSheet( "QPushButton{background-color: rgba(" + this->custom_button_color_c5 + ", " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButton_c6->setStyleSheet( "QPushButton{background-color: rgba(" + this->custom_button_color_c6 + ", " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonDummy1->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonDummy2->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonDummy3->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonDebug->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(240,240,240);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonMusic->setStyleSheet( "QPushButton{background-color: rgba(38, 42, 51, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(255,255,255);} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->pushButtonAndroidAuto->setStyleSheet( "QPushButton{background-color: rgba(26, 115, 232, " + alp + " ); outline-style: dotted; outline-color: #92a8d1; border: 1px solid rgba(255,255,255,0.10); color: rgb(255,255,255); border-bottom: 0px; border-top: 0px;} QPushButton:focus {border: 2px solid rgba(125,125,125,0.5);}");
++        ui_->labelAndroidAutoBottom->setStyleSheet( "background-color: rgba(26, 115, 232, " + alp + " ); border-bottom-left-radius: 16px; border-bottom-right-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(255,255,255); border-top: 0px;");
++        ui_->labelAndroidAutoTop->setStyleSheet( "background-color: rgba(26, 115, 232, " + alp + " ); border-top-left-radius: 16px; border-top-right-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(255,255,255); border-bottom: 0px;");
++        ui_->pushButtonNoDevice->setStyleSheet( "background-color: rgba(26, 115, 232, " + alp + " ); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(255,255,255);");
++        ui_->pushButtonNoWiFiDevice->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10); color: rgb(255,255,255);");
+         // old style
+-        ui_->pushButtonSettings2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonLock2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonMusic2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonBrightness2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonToggleGUI2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonExit2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonShutdown2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonReboot2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonCancel2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonAndroidAuto2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonNoDevice2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonWifi2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonNoWiFiDevice2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonDay2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonNight2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonCameraShow2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonVolume2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
+-        ui_->pushButtonDebug2->setStyleSheet( "background-color: rgba(136, 138, 133, " + alp + " ); color: rgb(255, 255, 255); border-radius: 4px; border: 2px solid rgba(255,255,255,0.5);");
++        ui_->pushButtonSettings2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonLock2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonMusic2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonBrightness2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonToggleGUI2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonExit2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonShutdown2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonReboot2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonCancel2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonAndroidAuto2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonNoDevice2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonWifi2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonNoWiFiDevice2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonDay2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonNight2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonCameraShow2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonVolume2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
++        ui_->pushButtonDebug2->setStyleSheet( "background-color: rgba(38, 42, 51, " + alp + " ); color: rgb(255, 255, 255); border-radius: 16px; border: 1px solid rgba(255,255,255,0.10);");
+     }
+ }
+ 
+diff --git a/src/autoapp/UI/SettingsWindow.cpp b/src/autoapp/UI/SettingsWindow.cpp
+index cb616f4..ea402c1 100644
+--- a/src/autoapp/UI/SettingsWindow.cpp
++++ b/src/autoapp/UI/SettingsWindow.cpp
+@@ -99,6 +99,7 @@ SettingsWindow::SettingsWindow(configuration::IConfiguration::Pointer configurat
+ 
+     ui_->horizontalGroupBox->hide();
+     ui_->labelBluetoothAdapterAddress->hide();
++    ui_->groupBoxMediaPlayer->hide();  // moderno: no local music player
+     ui_->lineEditExternalBluetoothAdapterAddress->hide();
+     ui_->labelTestInProgress->hide();
+ 
+diff --git a/src/autoapp/autoapp.cpp b/src/autoapp/autoapp.cpp
+index b8fcfd0..01425c2 100644
+--- a/src/autoapp/autoapp.cpp
++++ b/src/autoapp/autoapp.cpp
+@@ -104,6 +104,16 @@ int main(int argc, char* argv[])
+     startIOServiceWorkers(ioService, threadPool);
+ 
+     QApplication qApplication(argc, argv);
++    // Moderno: flat, finger-sized controls everywhere a widget does not set its own style.
++    qApplication.setStyleSheet(
++        "QScrollBar:vertical { width: 28px; background: transparent; }"
++        "QScrollBar::handle:vertical { min-height: 48px; border-radius: 10px; background: rgba(255,255,255,0.25); }"
++        "QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }"
++        "QSlider::groove:horizontal { height: 8px; border-radius: 4px; background: rgba(255,255,255,0.18); }"
++        "QSlider::sub-page:horizontal { border-radius: 4px; background: rgb(26,115,232); }"
++        "QSlider::handle:horizontal { width: 32px; height: 32px; margin: -12px 0; border-radius: 16px; background: rgb(240,240,240); }"
++        "QCheckBox::indicator { width: 32px; height: 32px; }"
++        "QComboBox { min-height: 44px; }");
+     const int width = QApplication::desktop()->width();
+     const int height = QApplication::desktop()->height();
+     OPENAUTO_LOG(info) << "[OpenAuto] Display width: " << width;

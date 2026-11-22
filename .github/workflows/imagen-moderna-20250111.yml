@@ -1,0 +1,143 @@
+# Crankshaft 20250111 moderno: takes the official 20250111 armhf image and swaps in
+# OpenAuto/aasdk rebuilt with moderno/openauto.patch (stability, pinch-zoom, day/night
+# from the phone, no music player, modern look). Spanish clock and keyboard.
+#
+# Runs on every push to "moderno-20250111", or by hand from the Actions tab.
+# Result: artifact "crankshaft-20250111-moderno" with the .img.xz to flash with Raspberry Pi Imager.
+
+name: imagen-moderna-20250111
+
+on:
+  push:
+    branches: [moderno-20250111]
+  workflow_dispatch:
+
+env:
+  IMAGE_URL: https://github.com/opencardev/crankshaft/releases/download/20250111/20250111-Debian_buster-armhf.zip
+  AASDK_REPO: https://github.com/SonOfGib/aasdk.git
+  AASDK_COMMIT: 288e894
+  OPENAUTO_REPO: https://github.com/opencardev/openauto.git
+  OPENAUTO_COMMIT: 1a74e9f
+
+jobs:
+  imagen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Liberar disco y preparar qemu
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support unzip xz-utils
+          sudo update-binfmts --enable qemu-arm
+          df -h /
+
+      - name: Descargar imagen oficial 20250111
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o official.zip "$IMAGE_URL"
+          mkdir official && unzip -q official.zip -d official && rm official.zip
+          IMG=$(find official -name '*.img' | head -1)
+          test -n "$IMG"
+          mv "$IMG" crankshaft.img
+          ls -la crankshaft.img
+
+      - name: Montar imagen (raíz de solo lectura + capa para compilar)
+        run: |
+          set -euo pipefail
+          LOOP=$(sudo losetup -fP --show crankshaft.img)
+          echo "LOOP=$LOOP" >> "$GITHUB_ENV"
+          sudo mkdir -p /mnt/img /mnt/build /work/upper /work/wd
+          # The root is the partition that holds autoapp.
+          for p in "$LOOP"p*; do
+            sudo mount -o ro "$p" /mnt/img 2>/dev/null || continue
+            if [ -f /mnt/img/usr/local/bin/autoapp ]; then echo "ROOTPART=$p" >> "$GITHUB_ENV"; break; fi
+            sudo umount /mnt/img
+          done
+          test -f /mnt/img/usr/local/bin/autoapp
+          # Build in an overlay so build deps never land in the image.
+          sudo mount -t overlay overlay -o lowerdir=/mnt/img,upperdir=/work/upper,workdir=/work/wd /mnt/build
+          sudo cp /usr/bin/qemu-arm-static /mnt/build/usr/bin/
+          for d in proc sys dev dev/pts; do sudo mount --bind /$d /mnt/build/$d; done
+          sudo rm -f /mnt/build/etc/resolv.conf && sudo cp /etc/resolv.conf /mnt/build/etc/resolv.conf
+
+      - name: Compilar aasdk y OpenAuto (armhf, Buster, Qt 5.15.1 de la imagen)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /mnt/build/src && sudo cp moderno/openauto.patch /mnt/build/src/
+          sudo tee /mnt/build/src/build.sh > /dev/null <<'EOF'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          # raspbian.raspberrypi.org dropped Buster; the archive lives on legacy.raspbian.org.
+          rm -f /etc/apt/sources.list.d/*.list
+          echo "deb http://legacy.raspbian.org/raspbian buster main contrib non-free rpi" > /etc/apt/sources.list
+          echo "deb http://archive.raspberrypi.org/debian buster main" > /etc/apt/sources.list.d/raspi.list
+          apt-get -o Acquire::Check-Valid-Until=false update
+          apt-get install -y --no-install-recommends build-essential cmake git ca-certificates \
+            libboost-all-dev libusb-1.0-0-dev libssl-dev libprotobuf-dev protobuf-compiler \
+            librtaudio-dev libtag1-dev libblkid-dev libgps-dev libraspberrypi-dev libpulse-dev libasound2-dev
+          for l in EGL GLESv2 OpenVG WFC; do ln -sf /opt/vc/lib/libbrcm$l.so /usr/lib/arm-linux-gnueabihf/lib$l.so; done
+          make -C /opt/vc/src/hello_pi/libs/ilclient
+          cd /src
+          git clone "$AASDK_REPO" aasdk && git -C aasdk checkout "$AASDK_COMMIT"
+          git clone "$OPENAUTO_REPO" openauto && git -C openauto checkout "$OPENAUTO_COMMIT"
+          git -C openauto apply /src/openauto.patch
+          cmake -S aasdk -B aasdk_build -DCMAKE_BUILD_TYPE=Release
+          make -C aasdk_build -j"$(nproc)"
+          cmake -S openauto -B openauto_build -DCMAKE_BUILD_TYPE=Release -DRPI3_BUILD=TRUE \
+            -DCMAKE_PREFIX_PATH=/usr/local/qt5 \
+            -DAASDK_INCLUDE_DIRS=/src/aasdk/include -DAASDK_LIBRARIES=/src/aasdk/lib/libaasdk.so \
+            -DAASDK_PROTO_INCLUDE_DIRS=/src/aasdk_build -DAASDK_PROTO_LIBRARIES=/src/aasdk/lib/libaasdk_proto.so
+          make -C openauto_build -j"$(nproc)"
+          ls -la /src/openauto/bin /src/aasdk/lib
+          EOF
+          sudo chroot /mnt/build env AASDK_REPO="$AASDK_REPO" AASDK_COMMIT="$AASDK_COMMIT" \
+            OPENAUTO_REPO="$OPENAUTO_REPO" OPENAUTO_COMMIT="$OPENAUTO_COMMIT" bash /src/build.sh
+          mkdir -p out
+          sudo cp /mnt/build/src/openauto/bin/autoapp /mnt/build/src/openauto/bin/btservice \
+                  /mnt/build/src/aasdk/lib/libaasdk.so /mnt/build/src/aasdk/lib/libaasdk_proto.so out/
+          sudo chown -R "$(id -u):$(id -g)" out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binarios-openauto-moderno
+          path: out/
+          retention-days: 30
+
+      - name: Instalar binarios, hora y teclado en la imagen
+        run: |
+          set -euo pipefail
+          for d in dev/pts dev sys proc; do sudo umount /mnt/build/$d; done
+          sudo umount /mnt/build
+          sudo mount -o remount,rw /mnt/img
+          R=/mnt/img
+          sudo install -m 755 out/autoapp out/btservice $R/usr/local/bin/
+          sudo install -m 644 out/libaasdk.so out/libaasdk_proto.so $R/usr/local/lib/
+          # .md5 files sit next to each binary, in md5sum format with the bare name (as upstream).
+          for f in bin/autoapp bin/btservice lib/libaasdk.so lib/libaasdk_proto.so; do
+            (cd $R/usr/local/$(dirname $f) && md5sum $(basename $f) | sudo tee $(basename $f).md5 > /dev/null)
+          done
+          echo "Europe/Madrid" | sudo tee $R/etc/timezone > /dev/null
+          sudo ln -sf /usr/share/zoneinfo/Europe/Madrid $R/etc/localtime
+          sudo sed -i 's/^XKBLAYOUT=.*/XKBLAYOUT="es"/' $R/etc/default/keyboard
+          grep XKBLAYOUT $R/etc/default/keyboard
+          cat $R/usr/local/bin/autoapp.md5
+          sudo umount /mnt/img
+          sudo losetup -d "$LOOP"
+
+      - name: Comprimir
+        run: |
+          set -euo pipefail
+          NAME=crankshaft-20250111-moderno-$(date +%Y-%m-%d)
+          mv crankshaft.img "$NAME.img"
+          xz -T0 -6 "$NAME.img"
+          sha256sum "$NAME.img.xz" > "$NAME.img.xz.sha256"
+          mkdir deploy && mv "$NAME".img.xz* deploy/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crankshaft-20250111-moderno
+          path: deploy/
+          retention-days: 30
