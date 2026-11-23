@@ -634,7 +634,7 @@ index 29a45b3..67f77e3 100644
  {
      OPENAUTO_LOG(info) << "[VideoService] video focus indication.";
 diff --git a/src/autoapp/UI/MainWindow.cpp b/src/autoapp/UI/MainWindow.cpp
-index 7a3166c..de0f462 100644
+index 7a3166c..e020b15 100644
 --- a/src/autoapp/UI/MainWindow.cpp
 +++ b/src/autoapp/UI/MainWindow.cpp
 @@ -23,6 +23,10 @@
@@ -953,7 +953,67 @@ index 7a3166c..de0f462 100644
      ui_->bigClock->setText(time_text);
      ui_->bigClock2->setText(time_text);
  
-@@ -2084,14 +2195,9 @@ void f1x::openauto::autoapp::ui::MainWindow::tmpChanged()
+@@ -1786,11 +1897,6 @@ void f1x::openauto::autoapp::ui::MainWindow::tmpChanged()
+         if (ui_->headerWidget->isVisible() == false) {
+             ui_->headerWidget->show();
+         }
+-        if (ui_->VolumeSliderControl->isVisible() == false) {
+-            if (ui_->mediaWidget->isVisible() == false) {
+-                ui_->VolumeSliderControl->show();
+-            }
+-        }
+         if (ui_->clockOnlyWidget->isVisible() == true) {
+             ui_->clockOnlyWidget->hide();
+             toggleGUI();
+@@ -1814,39 +1920,25 @@ void f1x::openauto::autoapp::ui::MainWindow::tmpChanged()
+     }
+ 
+     // check if phone is conencted to usb
+-    if (std::ifstream("/tmp/android_device")) {
+-        if (ui_->ButtonAndroidAuto->isVisible() == false) {
+-            ui_->ButtonAndroidAuto->show();
+-            ui_->pushButtonNoDevice->hide();
+-        }
+-        if (ui_->pushButtonAndroidAuto2->isVisible() == false) {
+-            ui_->pushButtonAndroidAuto2->show();
+-            ui_->pushButtonNoDevice2->hide();
+-        }
++    const bool phonePlugged = std::ifstream("/tmp/android_device").good();
++    ui_->ButtonAndroidAuto->setVisible(phonePlugged);
++    ui_->pushButtonNoDevice->setVisible(!phonePlugged);
++    ui_->pushButtonAndroidAuto2->setVisible(phonePlugged);
++    ui_->pushButtonNoDevice2->setVisible(!phonePlugged);
++    if (phonePlugged) {
+         try {
+             QFile deviceData(QString("/tmp/android_device"));
+             deviceData.open(QIODevice::ReadOnly);
+             QTextStream data_date(&deviceData);
+             data_date.readLine();
+-            // wait for second line to be written
+-            QString linedate;
+-            while (linedate.isNull()) {
+-                linedate = data_date.readLine();
+-            }
++            // second line: the phone model
++            QString linedate = data_date.readLine();
+             deviceData.close();
+             ui_->labelAndroidAutoBottom->setText(linedate.simplified().replace("_"," "));
+         } catch (...) {
+             ui_->labelAndroidAutoBottom->setText("");
+         }
+     } else {
+-        if (ui_->ButtonAndroidAuto->isVisible() == true) {
+-            ui_->pushButtonNoDevice->show();
+-            ui_->ButtonAndroidAuto->hide();
+-        }
+-        if (ui_->pushButtonAndroidAuto2->isVisible() == true) {
+-            ui_->pushButtonNoDevice2->show();
+-            ui_->pushButtonAndroidAuto2->hide();
+-        }
+         ui_->labelAndroidAutoBottom->setText("");
+     }
+ 
+@@ -2084,14 +2176,9 @@ void f1x::openauto::autoapp::ui::MainWindow::tmpChanged()
          }
      }
  
@@ -984,7 +1044,7 @@ index cb616f4..ea402c1 100644
      ui_->labelTestInProgress->hide();
  
 diff --git a/src/autoapp/autoapp.cpp b/src/autoapp/autoapp.cpp
-index b8fcfd0..2d8c9c8 100644
+index b8fcfd0..12c1a78 100644
 --- a/src/autoapp/autoapp.cpp
 +++ b/src/autoapp/autoapp.cpp
 @@ -19,6 +19,7 @@
@@ -995,7 +1055,19 @@ index b8fcfd0..2d8c9c8 100644
  #include <aasdk/USB/USBHub.hpp>
  #include <aasdk/USB/ConnectedAccessoriesEnumerator.hpp>
  #include <aasdk/USB/AccessoryModeQueryChain.hpp>
-@@ -104,6 +105,16 @@ int main(int argc, char* argv[])
+@@ -84,6 +85,11 @@ void configureLogging() {
+             OPENAUTO_LOG(warning) << "[OpenAuto] " << logIni << " was provided but was not valid.";
+         }
+     }
++    // Moderno: the stock log settings have no sink, so nothing was ever written.
++    boost::log::add_file_log(boost::log::keywords::file_name = "/tmp/openauto.log",
++                             boost::log::keywords::open_mode = std::ios_base::app,
++                             boost::log::keywords::auto_flush = true);
++    boost::log::core::get()->set_filter(boost::log::trivial::severity >= boost::log::trivial::info);
+ }
+ 
+ int main(int argc, char* argv[])
+@@ -104,6 +110,16 @@ int main(int argc, char* argv[])
      startIOServiceWorkers(ioService, threadPool);
  
      QApplication qApplication(argc, argv);
@@ -1012,7 +1084,7 @@ index b8fcfd0..2d8c9c8 100644
      const int width = QApplication::desktop()->width();
      const int height = QApplication::desktop()->height();
      OPENAUTO_LOG(info) << "[OpenAuto] Display width: " << width;
-@@ -212,6 +223,13 @@ int main(int argc, char* argv[])
+@@ -212,6 +228,13 @@ int main(int argc, char* argv[])
      mainWindow.setFixedSize(width, height);
      mainWindow.adjustSize();
  
@@ -1026,7 +1098,7 @@ index b8fcfd0..2d8c9c8 100644
      aasdk::usb::USBWrapper usbWrapper(usbContext);
      aasdk::usb::AccessoryModeQueryFactory queryFactory(usbWrapper, ioService);
      aasdk::usb::AccessoryModeQueryChainFactory queryChainFactory(usbWrapper, ioService, queryFactory);
-@@ -228,6 +246,10 @@ int main(int argc, char* argv[])
+@@ -228,6 +251,10 @@ int main(int argc, char* argv[])
  
      QObject::connect(&mainWindow, &autoapp::ui::MainWindow::TriggerAppStart, [&app]() {
          OPENAUTO_LOG(info) << "[Autoapp] TriggerAppStart: Manual start android auto.";
@@ -1037,7 +1109,7 @@ index b8fcfd0..2d8c9c8 100644
          try {
              app->disableAutostartEntity = false;
              app->resume();
-@@ -237,33 +259,11 @@ int main(int argc, char* argv[])
+@@ -237,33 +264,11 @@ int main(int argc, char* argv[])
          }
      });
  

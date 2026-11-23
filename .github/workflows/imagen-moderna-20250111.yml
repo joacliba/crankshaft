@@ -175,11 +175,6 @@ jobs:
             sudo sed -i -E 's/^BR_NIGHT=([0-5]?[0-9])$/BR_NIGHT=120/' /mnt/boot/crankshaft/crankshaft_env.sh
           fi
           sudo cp img-out/wallpaper.png img-out/wallpaper-night.png /mnt/boot/crankshaft/
-          # The stock log settings have no sink, so autoapp's log lands nowhere; send it to
-          # /tmp/openauto.log, which the Debug button already packs into /boot/debug.zip.
-          printf '%s\n' '[Core]' 'Filter="%Severity% >= info"' 'DisableLogging="false"' '' \
-            '[Sinks.File]' 'Destination="TextFile"' 'FileName="/tmp/openauto.log"' 'Append="true"' 'AutoFlush="true"' \
-            | sudo tee /mnt/boot/crankshaft/openauto-logs.ini > /dev/null
           ls -la /mnt/boot/crankshaft | head -40
           sudo umount /mnt/boot
           sudo umount /mnt/img
