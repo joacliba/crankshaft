@@ -458,7 +458,7 @@ index e4348a4..cda6075 100644
  {
      std::ifstream ifile(fileName, std::ios::in);
 diff --git a/src/autoapp/UI/MainWindow.cpp b/src/autoapp/UI/MainWindow.cpp
-index 7a3166c..c7236ac 100644
+index 7a3166c..709c9ad 100644
 --- a/src/autoapp/UI/MainWindow.cpp
 +++ b/src/autoapp/UI/MainWindow.cpp
 @@ -23,6 +23,10 @@
@@ -472,7 +472,7 @@ index 7a3166c..c7236ac 100644
  #include <QMessageBox>
  #include <QTextStream>
  #include <QFontDatabase>
-@@ -86,6 +90,105 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
+@@ -86,6 +90,103 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
      this->wallpaperEQFileExists = check_file_exist("wallpaper-eq.png");
  
      ui_->setupUi(this);
@@ -547,10 +547,8 @@ index 7a3166c..c7236ac 100644
 +        aaColumn->addWidget(ui_->AAUSBWidget, 1);
 +        aaColumn->addWidget(ui_->AAWIFIWidget, 1);
 +        heroLayout->addLayout(aaColumn, 2);
-+        ui_->pushButtonNoDevice->setText("Connecta el
-+telèfon per USB");
-+        ui_->pushButtonNoWiFiDevice->setText("Cap telèfon
-+per WiFi");
++        ui_->pushButtonNoDevice->setText(QString::fromUtf8("Connecta el\ntel\u00e8fon per USB"));
++        ui_->pushButtonNoWiFiDevice->setText(QString::fromUtf8("Cap tel\u00e8fon\nper WiFi"));
 +
 +        // One strip of toggles: the quick switches go in front of the system buttons.
 +        QList<QPushButton*> quick = { ui_->pushButtonDay, ui_->pushButtonNight, ui_->pushButtonCameraShow,
@@ -578,7 +576,7 @@ index 7a3166c..c7236ac 100644
  
      connect(ui_->pushButtonSettings, &QPushButton::clicked, this, &MainWindow::openSettings);
      connect(ui_->pushButtonSettings2, &QPushButton::clicked, this, &MainWindow::openSettings);
-@@ -533,25 +636,11 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
+@@ -533,25 +634,11 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
      ui_->comboBoxAlbum->hide();
      ui_->pushButtonAlbum->hide();
  
@@ -608,7 +606,7 @@ index 7a3166c..c7236ac 100644
  
      watcher_tmp = new QFileSystemWatcher(this);
      watcher_tmp->addPath("/tmp");
-@@ -781,54 +870,71 @@ void f1x::openauto::autoapp::ui::MainWindow::updateAlpha()
+@@ -781,54 +868,71 @@ void f1x::openauto::autoapp::ui::MainWindow::updateAlpha()
          this->alpha_current_str = value;
          double alpha = value/100.0;
          QString alp=QString::number(alpha);
@@ -727,7 +725,7 @@ index 7a3166c..c7236ac 100644
      }
  }
  
-@@ -1089,15 +1195,16 @@ void f1x::openauto::autoapp::ui::MainWindow::showTime()
+@@ -1089,15 +1193,16 @@ void f1x::openauto::autoapp::ui::MainWindow::showTime()
  {
      QTime time=QTime::currentTime();
      QDate date=QDate::currentDate();
