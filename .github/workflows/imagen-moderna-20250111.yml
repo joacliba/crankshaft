@@ -140,6 +140,9 @@ jobs:
           sudo ln -sf /usr/share/zoneinfo/Europe/Madrid $R/etc/localtime
           sudo sed -i 's/^XKBLAYOUT=.*/XKBLAYOUT="es"/' $R/etc/default/keyboard
           grep XKBLAYOUT $R/etc/default/keyboard
+          # Night mode only dims the backlight: the stock 30/255 looks like a dead screen.
+          sudo sed -i 's/^BR_NIGHT=.*/BR_NIGHT=120/' $R/opt/crankshaft/crankshaft_default_env.sh
+          grep BR_NIGHT $R/opt/crankshaft/crankshaft_default_env.sh
           cat $R/usr/local/bin/autoapp.md5
 
           # Boot splash: our screen replaces plymouth; autoapp stops it once the dashboard is drawn.
@@ -167,6 +170,10 @@ jobs:
           sudo sed -i -E 's/ (quiet|loglevel=[0-9]+|vt\.global_cursor_default=[0-9]+|logo\.nologo)\b//g; s/$/ quiet loglevel=3 vt.global_cursor_default=0 logo.nologo/' /mnt/boot/cmdline.txt
           cat /mnt/boot/cmdline.txt
           sudo install -d /mnt/boot/crankshaft
+          # Same floor for a night brightness saved in the user settings (0-59 -> 120).
+          if [ -f /mnt/boot/crankshaft/crankshaft_env.sh ]; then
+            sudo sed -i -E 's/^BR_NIGHT=([0-5]?[0-9])$/BR_NIGHT=120/' /mnt/boot/crankshaft/crankshaft_env.sh
+          fi
           sudo cp img-out/wallpaper.png img-out/wallpaper-night.png /mnt/boot/crankshaft/
           ls -la /mnt/boot/crankshaft | head -40
           sudo umount /mnt/boot

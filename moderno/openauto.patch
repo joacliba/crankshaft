@@ -634,7 +634,7 @@ index 29a45b3..67f77e3 100644
  {
      OPENAUTO_LOG(info) << "[VideoService] video focus indication.";
 diff --git a/src/autoapp/UI/MainWindow.cpp b/src/autoapp/UI/MainWindow.cpp
-index 7a3166c..1ed8614 100644
+index 7a3166c..de0f462 100644
 --- a/src/autoapp/UI/MainWindow.cpp
 +++ b/src/autoapp/UI/MainWindow.cpp
 @@ -23,6 +23,10 @@
@@ -953,6 +953,24 @@ index 7a3166c..1ed8614 100644
      ui_->bigClock->setText(time_text);
      ui_->bigClock2->setText(time_text);
  
+@@ -2084,14 +2195,9 @@ void f1x::openauto::autoapp::ui::MainWindow::tmpChanged()
+         }
+     }
+ 
+-    // hide gui toggle if enabled in settings
+-    if (this->configuration_->hideMenuToggle()) {
+-        ui_->pushButtonToggleGUI->hide();
+-        ui_->pushButtonToggleGUI2->hide();
+-    } else {
+-        ui_->pushButtonToggleGUI->show();
+-        ui_->pushButtonToggleGUI2->show();
+-    }
++    // Moderno: no old/new menu switch (the eye tile), the Peugeot home is the only one.
++    ui_->pushButtonToggleGUI->hide();
++    ui_->pushButtonToggleGUI2->hide();
+ 
+     // hide brightness button if eanbled in settings
+     if (configuration_->hideBrightnessControl()) {
 diff --git a/src/autoapp/UI/SettingsWindow.cpp b/src/autoapp/UI/SettingsWindow.cpp
 index cb616f4..ea402c1 100644
 --- a/src/autoapp/UI/SettingsWindow.cpp
