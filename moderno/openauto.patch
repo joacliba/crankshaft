@@ -458,19 +458,21 @@ index e4348a4..cda6075 100644
  {
      std::ifstream ifile(fileName, std::ios::in);
 diff --git a/src/autoapp/UI/MainWindow.cpp b/src/autoapp/UI/MainWindow.cpp
-index 7a3166c..29a9cce 100644
+index 7a3166c..c7236ac 100644
 --- a/src/autoapp/UI/MainWindow.cpp
 +++ b/src/autoapp/UI/MainWindow.cpp
-@@ -23,6 +23,8 @@
+@@ -23,6 +23,10 @@
  #include "ui_mainwindow.h"
  #include <QTimer>
  #include <QDateTime>
 +#include <QLocale>
 +#include <QPainter>
++#include <QGuiApplication>
++#include <QGridLayout>
  #include <QMessageBox>
  #include <QTextStream>
  #include <QFontDatabase>
-@@ -86,6 +88,16 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
+@@ -86,6 +90,105 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
      this->wallpaperEQFileExists = check_file_exist("wallpaper-eq.png");
  
      ui_->setupUi(this);
@@ -484,10 +486,99 @@ index 7a3166c..29a9cce 100644
 +        painter.end();
 +        b->setIcon(QIcon(pm));
 +    }
++
++    // Moderno: Peugeot i-Connect style home. Big card with car name, clock and date next to a big
++    // Android Auto card, and one strip of icon toggles underneath. The stock widgets are only moved,
++    // so all their show/hide logic keeps working.
++    {
++        const int screenH = QGuiApplication::primaryScreen()->geometry().height();
++        QGridLayout* grid = ui_->gridLayout_TileArea;
++        QLayoutItem* rows[3];
++        for (int r = 0; r < 3; r++) rows[r] = grid->itemAtPosition(r, 0);
++        for (int r = 0; r < 3; r++) if (rows[r]) grid->removeItem(rows[r]);
++
++        QWidget* hero = new QWidget(ui_->menuWidget);
++        QHBoxLayout* heroLayout = new QHBoxLayout(hero);
++        heroLayout->setContentsMargins(0, 0, 0, 0);
++        heroLayout->setSpacing(14);
++        QWidget* clockCard = new QWidget(hero);
++        clockCard->setObjectName("clockCard");
++        clockCard->setAttribute(Qt::WA_StyledBackground, true);
++        clockCard->setStyleSheet("#clockCard{background: rgba(16, 19, 24, 0.88); border: 1px solid rgba(255,255,255,0.08); border-radius: 18px;}"
++                                 " QLabel{background: transparent; border: 0px;}");
++        QVBoxLayout* clockLayout = new QVBoxLayout(clockCard);
++        clockLayout->setContentsMargins(screenH / 16, 0, screenH / 16, 0);
++        clockLayout->setSpacing(0);
++        QLabel* heroName = new QLabel("COTXE DE CLIMENT", clockCard);
++        QFont nameFont = heroName->font();
++        nameFont.setPixelSize(qMax(13, screenH / 34));
++        nameFont.setLetterSpacing(QFont::AbsoluteSpacing, 4);
++        heroName->setFont(nameFont);
++        heroName->setStyleSheet("color: rgb(64, 160, 255);");
++        QLabel* heroClock = new QLabel("--:--", clockCard);
++        heroClock->setObjectName("heroClock");
++        QFont clockFont = heroClock->font();
++        clockFont.setPixelSize(screenH / 5);
++        clockFont.setWeight(QFont::Light);
++        heroClock->setFont(clockFont);
++        heroClock->setStyleSheet("color: rgb(244, 246, 250);");
++        QLabel* heroDate = new QLabel(clockCard);
++        heroDate->setObjectName("heroDate");
++        QFont dateFont = heroDate->font();
++        dateFont.setPixelSize(qMax(14, screenH / 26));
++        heroDate->setFont(dateFont);
++        heroDate->setStyleSheet("color: rgb(138, 147, 163);");
++        QWidget* accentLine = new QWidget(clockCard);
++        accentLine->setFixedSize(screenH / 8, 3);
++        accentLine->setStyleSheet("background: rgb(0, 120, 210); border-radius: 1px;");
++        clockLayout->addStretch(1);
++        clockLayout->addWidget(heroName);
++        clockLayout->addWidget(heroClock);
++        clockLayout->addWidget(heroDate);
++        clockLayout->addSpacing(screenH / 40);
++        clockLayout->addWidget(accentLine);
++        clockLayout->addStretch(1);
++        heroLayout->addWidget(clockCard, 3);
++
++        ui_->Layout_Sliderselect->removeWidget(ui_->AAUSBWidget);
++        ui_->Layout_Sliderselect->removeWidget(ui_->AAWIFIWidget);
++        QVBoxLayout* aaColumn = new QVBoxLayout();
++        aaColumn->setSpacing(14);
++        aaColumn->addWidget(ui_->AAUSBWidget, 1);
++        aaColumn->addWidget(ui_->AAWIFIWidget, 1);
++        heroLayout->addLayout(aaColumn, 2);
++        ui_->pushButtonNoDevice->setText("Connecta el
++telèfon per USB");
++        ui_->pushButtonNoWiFiDevice->setText("Cap telèfon
++per WiFi");
++
++        // One strip of toggles: the quick switches go in front of the system buttons.
++        QList<QPushButton*> quick = { ui_->pushButtonDay, ui_->pushButtonNight, ui_->pushButtonCameraShow,
++                                      ui_->pushButtonVolume, ui_->pushButtonDebug };
++        for (int i = 0; i < quick.size(); i++) {
++            ui_->Layout_Sliderselect->removeWidget(quick[i]);
++            ui_->horizontalLayout_14->insertWidget(i, quick[i]);
++        }
++        const int toggleH = qMax(64, screenH / 7);
++        for (QPushButton* b : ui_->menuWidget->findChildren<QPushButton*>()) {
++            if (b->parentWidget() == ui_->horizontalWidgetButtons || b->parentWidget() == ui_->horizontalWidgetPower || quick.contains(b)) {
++                b->setFixedHeight(toggleH);
++                b->setIconSize(QSize(toggleH / 2, toggleH / 2));
++            }
++        }
++
++        grid->addWidget(hero, 0, 0, 1, 2);
++        if (rows[1]) grid->addItem(rows[1], 1, 0, 1, 2);
++        if (rows[2]) grid->addItem(rows[2], 2, 0, 1, 2);
++        grid->setRowStretch(0, 1);
++        grid->setRowStretch(1, 0);
++        grid->setRowStretch(2, 0);
++        grid->setSpacing(14);
++    }
  
      connect(ui_->pushButtonSettings, &QPushButton::clicked, this, &MainWindow::openSettings);
      connect(ui_->pushButtonSettings2, &QPushButton::clicked, this, &MainWindow::openSettings);
-@@ -533,25 +545,11 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
+@@ -533,25 +636,11 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
      ui_->comboBoxAlbum->hide();
      ui_->pushButtonAlbum->hide();
  
@@ -517,7 +608,7 @@ index 7a3166c..29a9cce 100644
  
      watcher_tmp = new QFileSystemWatcher(this);
      watcher_tmp->addPath("/tmp");
-@@ -781,54 +779,71 @@ void f1x::openauto::autoapp::ui::MainWindow::updateAlpha()
+@@ -781,54 +870,71 @@ void f1x::openauto::autoapp::ui::MainWindow::updateAlpha()
          this->alpha_current_str = value;
          double alpha = value/100.0;
          QString alp=QString::number(alpha);
@@ -636,7 +727,7 @@ index 7a3166c..29a9cce 100644
      }
  }
  
-@@ -1089,13 +1104,12 @@ void f1x::openauto::autoapp::ui::MainWindow::showTime()
+@@ -1089,15 +1195,16 @@ void f1x::openauto::autoapp::ui::MainWindow::showTime()
  {
      QTime time=QTime::currentTime();
      QDate date=QDate::currentDate();
@@ -648,13 +739,17 @@ index 7a3166c..29a9cce 100644
 -        time_text[3] = ' ';
 -        time_text[8] = ' ';
 -    }
-+    // Moderno: car name and date in the header (Catalan), instead of the Crankshaft brand.
-+    ui_->Header_Label->setText("<span style='color:#f2f4f7;'>COTXE DE CLIMENT</span>"
-+                               "<span style='color:#8a93a3;'>&nbsp;&nbsp;&#183;&nbsp;&nbsp;"
-+                               + QLocale(QLocale::Catalan).toString(date, "dddd d MMMM") + "</span>");
++    ui_->Header_Label->setText(""); // the name and date live in the home card now
  
      ui_->Digital_clock->setText(time_text);
++    if (QLabel* heroClock = this->findChild<QLabel*>("heroClock")) heroClock->setText(time_text);
++    if (QLabel* heroDate = this->findChild<QLabel*>("heroDate")) {
++        QString d = QLocale(QLocale::Catalan).toString(date, "dddd, d MMMM");
++        heroDate->setText(d.left(1).toUpper() + d.mid(1));
++    }
      ui_->bigClock->setText(time_text);
+     ui_->bigClock2->setText(time_text);
+ 
 diff --git a/src/autoapp/UI/SettingsWindow.cpp b/src/autoapp/UI/SettingsWindow.cpp
 index cb616f4..ea402c1 100644
 --- a/src/autoapp/UI/SettingsWindow.cpp
