@@ -1,3 +1,46 @@
+diff --git a/include/f1x/openauto/autoapp/App.hpp b/include/f1x/openauto/autoapp/App.hpp
+index 0af1e18..e09e861 100644
+--- a/include/f1x/openauto/autoapp/App.hpp
++++ b/include/f1x/openauto/autoapp/App.hpp
+@@ -46,6 +46,7 @@ public:
+     void stop();
+     void pause();
+     void resume();
++    bool isActive() const { return androidAutoEntity_ != nullptr; }
+     void onAndroidAutoQuit() override;
+     bool disableAutostartEntity = false;
+ 
+diff --git a/include/f1x/openauto/autoapp/Projection/IVideoOutput.hpp b/include/f1x/openauto/autoapp/Projection/IVideoOutput.hpp
+index 0fdbe5b..64bee50 100644
+--- a/include/f1x/openauto/autoapp/Projection/IVideoOutput.hpp
++++ b/include/f1x/openauto/autoapp/Projection/IVideoOutput.hpp
+@@ -19,6 +19,7 @@
+ #pragma once
+ 
+ #include <memory>
++#include <atomic>
+ #include <QRect>
+ #include <aasdk_proto/VideoFPSEnum.pb.h>
+ #include <aasdk_proto/VideoResolutionEnum.pb.h>
+@@ -33,6 +34,9 @@ namespace autoapp
+ namespace projection
+ {
+ 
++// Moderno: false while Android Auto runs hidden behind the dashboard (touches go to the dashboard).
++inline std::atomic<bool>& projectionVisible() { static std::atomic<bool> visible(true); return visible; }
++
+ class IVideoOutput
+ {
+ public:
+@@ -45,6 +49,8 @@ public:
+     virtual bool init() = 0;
+     virtual void write(uint64_t timestamp, const aasdk::common::DataConstBuffer& buffer) = 0;
+     virtual void stop() = 0;
++    // Moderno: hide/show the projection while the session keeps running in the background.
++    virtual void setVisible(bool) {}
+ 
+     virtual aasdk::proto::enums::VideoFPS::Enum getVideoFPS() const = 0;
+     virtual aasdk::proto::enums::VideoResolution::Enum getVideoResolution() const = 0;
 diff --git a/include/f1x/openauto/autoapp/Projection/InputDevice.hpp b/include/f1x/openauto/autoapp/Projection/InputDevice.hpp
 index b6197a1..67e449e 100644
 --- a/include/f1x/openauto/autoapp/Projection/InputDevice.hpp
@@ -58,6 +101,18 @@ index db47442..f891c19 100644
  };
  
  }
+diff --git a/include/f1x/openauto/autoapp/Projection/OMXVideoOutput.hpp b/include/f1x/openauto/autoapp/Projection/OMXVideoOutput.hpp
+index 4c88900..04fdd6e 100644
+--- a/include/f1x/openauto/autoapp/Projection/OMXVideoOutput.hpp
++++ b/include/f1x/openauto/autoapp/Projection/OMXVideoOutput.hpp
+@@ -48,6 +48,7 @@ public:
+     bool init() override;
+     void write(uint64_t timestamp, const aasdk::common::DataConstBuffer& buffer) override;
+     void stop() override;
++    void setVisible(bool visible) override;
+ 
+ private:
+     bool createComponents();
 diff --git a/include/f1x/openauto/autoapp/Service/SensorService.hpp b/include/f1x/openauto/autoapp/Service/SensorService.hpp
 index 66494fb..5de5286 100644
 --- a/include/f1x/openauto/autoapp/Service/SensorService.hpp
@@ -71,10 +126,31 @@ index 66494fb..5de5286 100644
      void sensorPolling();
      bool firstRun = true;
  
+diff --git a/include/f1x/openauto/autoapp/Service/VideoService.hpp b/include/f1x/openauto/autoapp/Service/VideoService.hpp
+index 24a8bfb..a0a7575 100644
+--- a/include/f1x/openauto/autoapp/Service/VideoService.hpp
++++ b/include/f1x/openauto/autoapp/Service/VideoService.hpp
+@@ -57,6 +57,7 @@ public:
+ private:
+     using std::enable_shared_from_this<VideoService>::shared_from_this;
+     void sendVideoFocusIndication();
++    void setProjectionVisible(bool visible);
+ 
+     boost::asio::io_service::strand strand_;
+     aasdk::channel::av::VideoServiceChannel::Pointer channel_;
 diff --git a/src/autoapp/App.cpp b/src/autoapp/App.cpp
-index b016ea2..c3a6c5d 100644
+index b016ea2..a52891a 100644
 --- a/src/autoapp/App.cpp
 +++ b/src/autoapp/App.cpp
+@@ -218,7 +218,7 @@ void App::pause()
+ {
+     strand_.dispatch([this, self = this->shared_from_this()]() {
+         OPENAUTO_LOG(info) << "[App] pause...";
+-        androidAutoEntity_->pause();
++        if(androidAutoEntity_ != nullptr) androidAutoEntity_->pause();
+     });
+ }
+ 
 @@ -262,6 +262,15 @@ void App::onAndroidAutoQuit()
              } catch (...) {
                  OPENAUTO_LOG(error) << "[App] onAndroidAutoQuit: exception caused by this->waitForDevice();";
@@ -92,10 +168,10 @@ index b016ea2..c3a6c5d 100644
      });
  }
 diff --git a/src/autoapp/Projection/InputDevice.cpp b/src/autoapp/Projection/InputDevice.cpp
-index 8bf0e5a..ba6c481 100644
+index 8bf0e5a..7cbd80c 100644
 --- a/src/autoapp/Projection/InputDevice.cpp
 +++ b/src/autoapp/Projection/InputDevice.cpp
-@@ -16,6 +16,7 @@
+@@ -16,9 +16,11 @@
  *  along with openauto. If not, see <http://www.gnu.org/licenses/>.
  */
  
@@ -103,7 +179,11 @@ index 8bf0e5a..ba6c481 100644
  #include <f1x/openauto/Common/Log.hpp>
  #include <f1x/openauto/autoapp/Projection/IInputDeviceEventHandler.hpp>
  #include <f1x/openauto/autoapp/Projection/InputDevice.hpp>
-@@ -55,6 +56,7 @@ void InputDevice::stop()
++#include <f1x/openauto/autoapp/Projection/IVideoOutput.hpp>
+ 
+ namespace f1x
+ {
+@@ -55,13 +57,14 @@ void InputDevice::stop()
      OPENAUTO_LOG(info) << "[InputDevice] stop.";
      parent_.removeEventFilter(this);
      eventHandler_ = nullptr;
@@ -111,7 +191,15 @@ index 8bf0e5a..ba6c481 100644
  }
  
  bool InputDevice::eventFilter(QObject* obj, QEvent* event)
-@@ -71,6 +73,12 @@ bool InputDevice::eventFilter(QObject* obj, QEvent* event)
+ {
+     std::lock_guard<decltype(mutex_)> lock(mutex_);
+ 
+-    if(eventHandler_ != nullptr)
++    if(eventHandler_ != nullptr && projectionVisible())
+     {
+         if(event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease)
+         {
+@@ -71,6 +74,12 @@ bool InputDevice::eventFilter(QObject* obj, QEvent* event)
                  return this->handleKeyEvent(event, key);
              }
          }
@@ -124,7 +212,7 @@ index 8bf0e5a..ba6c481 100644
          else if(event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease || event->type() == QEvent::MouseMove)
          {
              return this->handleTouchEvent(event);
-@@ -221,6 +229,87 @@ bool InputDevice::handleTouchEvent(QEvent* event)
+@@ -221,6 +230,87 @@ bool InputDevice::handleTouchEvent(QEvent* event)
      return true;
  }
  
@@ -212,6 +300,33 @@ index 8bf0e5a..ba6c481 100644
  bool InputDevice::hasTouchscreen() const
  {
      return configuration_->getTouchscreenEnabled();
+diff --git a/src/autoapp/Projection/OMXVideoOutput.cpp b/src/autoapp/Projection/OMXVideoOutput.cpp
+index 6a46380..3605aed 100644
+--- a/src/autoapp/Projection/OMXVideoOutput.cpp
++++ b/src/autoapp/Projection/OMXVideoOutput.cpp
+@@ -122,6 +122,22 @@ bool OMXVideoOutput::setupDisplayRegion()
+     return OMX_SetConfig(ilclient_get_handle(components_[VideoComponent::RENDERER]), OMX_IndexConfigDisplayRegion, &displayRegion) == OMX_ErrorNone;
+ }
+ 
++void OMXVideoOutput::setVisible(bool visible)
++{
++    std::lock_guard<decltype(mutex_)> lock(mutex_);
++    if(!isActive_) return;
++
++    OMX_CONFIG_DISPLAYREGIONTYPE displayRegion;
++    memset(&displayRegion, 0, sizeof(displayRegion));
++    displayRegion.nSize = sizeof(OMX_CONFIG_DISPLAYREGIONTYPE);
++    displayRegion.nVersion.nVersion = OMX_VERSION;
++    displayRegion.nPortIndex = 90;
++    displayRegion.alpha = visible ? 255 : 0;
++    displayRegion.set = OMX_DISPLAY_SET_ALPHA;
++    OMX_SetConfig(ilclient_get_handle(components_[VideoComponent::RENDERER]), OMX_IndexConfigDisplayRegion, &displayRegion);
++    OPENAUTO_LOG(info) << "[OMXVideoOutput] visible: " << visible;
++}
++
+ void OMXVideoOutput::write(uint64_t timestamp, const aasdk::common::DataConstBuffer& buffer)
+ {
+     std::lock_guard<decltype(mutex_)> lock(mutex_);
 diff --git a/src/autoapp/Service/AndroidAutoEntity.cpp b/src/autoapp/Service/AndroidAutoEntity.cpp
 index de11e9b..3e55b12 100644
 --- a/src/autoapp/Service/AndroidAutoEntity.cpp
@@ -457,8 +572,69 @@ index e4348a4..cda6075 100644
  bool SensorService::is_file_exist(const char *fileName)
  {
      std::ifstream ifile(fileName, std::ios::in);
+diff --git a/src/autoapp/Service/VideoService.cpp b/src/autoapp/Service/VideoService.cpp
+index 29a45b3..67f77e3 100644
+--- a/src/autoapp/Service/VideoService.cpp
++++ b/src/autoapp/Service/VideoService.cpp
+@@ -42,6 +42,7 @@ void VideoService::start()
+ {
+     strand_.dispatch([this, self = this->shared_from_this()]() {
+         OPENAUTO_LOG(info) << "[VideoService] start.";
++        projection::projectionVisible() = true;
+         channel_->receive(this->shared_from_this());
+     });
+ }
+@@ -58,6 +59,7 @@ void VideoService::pause()
+ {
+     strand_.dispatch([this, self = this->shared_from_this()]() {
+         OPENAUTO_LOG(info) << "[VideoService] pause.";
++        this->setProjectionVisible(false);
+     });
+ }
+ 
+@@ -65,6 +67,7 @@ void VideoService::resume()
+ {
+     strand_.dispatch([this, self = this->shared_from_this()]() {
+         OPENAUTO_LOG(info) << "[VideoService] resume.";
++        this->setProjectionVisible(true);
+     });
+ }
+ 
+@@ -191,10 +194,31 @@ void VideoService::onVideoFocusRequest(const aasdk::proto::messages::VideoFocusR
+         }
+     }
+ 
+-    this->sendVideoFocusIndication();
++    if (request.focus_mode() == 2) {
++        this->setProjectionVisible(false);
++    } else {
++        projection::projectionVisible() = true;
++        videoOutput_->setVisible(true);
++        this->sendVideoFocusIndication();
++    }
+     channel_->receive(this->shared_from_this());
+ }
+ 
++// Moderno: Android Auto keeps running behind the dashboard, like factory head units.
++void VideoService::setProjectionVisible(bool visible)
++{
++    projection::projectionVisible() = visible;
++    videoOutput_->setVisible(visible);
++
++    aasdk::proto::messages::VideoFocusIndication videoFocusIndication;
++    videoFocusIndication.set_focus_mode(visible ? aasdk::proto::enums::VideoFocusMode::FOCUSED : aasdk::proto::enums::VideoFocusMode::UNFOCUSED);
++    videoFocusIndication.set_unrequested(true);
++
++    auto promise = aasdk::channel::SendPromise::defer(strand_);
++    promise->then([]() {}, std::bind(&VideoService::onChannelError, this->shared_from_this(), std::placeholders::_1));
++    channel_->sendVideoFocusIndication(videoFocusIndication, std::move(promise));
++}
++
+ void VideoService::sendVideoFocusIndication()
+ {
+     OPENAUTO_LOG(info) << "[VideoService] video focus indication.";
 diff --git a/src/autoapp/UI/MainWindow.cpp b/src/autoapp/UI/MainWindow.cpp
-index 7a3166c..709c9ad 100644
+index 7a3166c..1ed8614 100644
 --- a/src/autoapp/UI/MainWindow.cpp
 +++ b/src/autoapp/UI/MainWindow.cpp
 @@ -23,6 +23,10 @@
@@ -576,7 +752,16 @@ index 7a3166c..709c9ad 100644
  
      connect(ui_->pushButtonSettings, &QPushButton::clicked, this, &MainWindow::openSettings);
      connect(ui_->pushButtonSettings2, &QPushButton::clicked, this, &MainWindow::openSettings);
-@@ -533,25 +634,11 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
+@@ -232,6 +333,8 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
+ 
+     // as default hide volume slider player
+     ui_->VolumeSliderControlPlayer->hide();
++    // Moderno: the volume bar only shows when the speaker tile is tapped.
++    ui_->VolumeSliderControl->hide();
+ 
+     // as default hide power buttons
+     ui_->exitWidget->hide();
+@@ -533,25 +636,11 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
      ui_->comboBoxAlbum->hide();
      ui_->pushButtonAlbum->hide();
  
@@ -606,7 +791,18 @@ index 7a3166c..709c9ad 100644
  
      watcher_tmp = new QFileSystemWatcher(this);
      watcher_tmp->addPath("/tmp");
-@@ -781,54 +868,71 @@ void f1x::openauto::autoapp::ui::MainWindow::updateAlpha()
+@@ -716,6 +805,10 @@ void f1x::openauto::autoapp::ui::MainWindow::on_pushButtonBrightness2_clicked()
+ 
+ void f1x::openauto::autoapp::ui::MainWindow::on_pushButtonVolume_clicked()
+ {
++    if (ui_->VolumeSliderControl->isVisible()) {
++        ui_->VolumeSliderControl->hide();
++        return;
++    }
+     ui_->horizontalSliderVolume->show();
+     ui_->volumeValueLabel->show();
+     if (this->toggleMute) {
+@@ -781,54 +874,71 @@ void f1x::openauto::autoapp::ui::MainWindow::updateAlpha()
          this->alpha_current_str = value;
          double alpha = value/100.0;
          QString alp=QString::number(alpha);
@@ -725,7 +921,16 @@ index 7a3166c..709c9ad 100644
      }
  }
  
-@@ -1089,15 +1193,16 @@ void f1x::openauto::autoapp::ui::MainWindow::showTime()
+@@ -940,7 +1050,7 @@ void f1x::openauto::autoapp::ui::MainWindow::playerHide()
+         ui_->oldmenuWidget->show();
+     }
+     ui_->mediaWidget->hide();
+-    ui_->VolumeSliderControl->show();
++    ui_->VolumeSliderControl->hide();
+     ui_->VolumeSliderControlPlayer->hide();
+     ui_->BrightnessSliderControl->hide();
+     if (configuration_->showNetworkinfo()) {
+@@ -1089,15 +1199,16 @@ void f1x::openauto::autoapp::ui::MainWindow::showTime()
  {
      QTime time=QTime::currentTime();
      QDate date=QDate::currentDate();
@@ -761,7 +966,7 @@ index cb616f4..ea402c1 100644
      ui_->labelTestInProgress->hide();
  
 diff --git a/src/autoapp/autoapp.cpp b/src/autoapp/autoapp.cpp
-index b8fcfd0..7fb310e 100644
+index b8fcfd0..2d8c9c8 100644
 --- a/src/autoapp/autoapp.cpp
 +++ b/src/autoapp/autoapp.cpp
 @@ -19,6 +19,7 @@
@@ -803,3 +1008,52 @@ index b8fcfd0..7fb310e 100644
      aasdk::usb::USBWrapper usbWrapper(usbContext);
      aasdk::usb::AccessoryModeQueryFactory queryFactory(usbWrapper, ioService);
      aasdk::usb::AccessoryModeQueryChainFactory queryChainFactory(usbWrapper, ioService, queryFactory);
+@@ -228,6 +246,10 @@ int main(int argc, char* argv[])
+ 
+     QObject::connect(&mainWindow, &autoapp::ui::MainWindow::TriggerAppStart, [&app]() {
+         OPENAUTO_LOG(info) << "[Autoapp] TriggerAppStart: Manual start android auto.";
++        if (app->isActive()) { // session running hidden: just bring it back
++            app->resume();
++            return;
++        }
+         try {
+             app->disableAutostartEntity = false;
+             app->resume();
+@@ -237,33 +259,11 @@ int main(int argc, char* argv[])
+         }
+     });
+ 
++    // Moderno: leaving Android Auto keeps the session alive in the background (no USB reset),
++    // so the Android Auto tile brings it straight back.
+     QObject::connect(&mainWindow, &autoapp::ui::MainWindow::TriggerAppStop, [&app]() {
+-        try {
+-            if (std::ifstream("/tmp/android_device")) {
+-                OPENAUTO_LOG(info) << "[Autoapp] TriggerAppStop: Manual stop usb android auto.";
+-                app->disableAutostartEntity = true;
+-                system("/usr/local/bin/autoapp_helper usbreset");
+-                usleep(500000);
+-                try {
+-                    app->stop();
+-                    //app->pause();
+-                } catch (...) {
+-                    OPENAUTO_LOG(error) << "[Autoapp] TriggerAppStop: stop();";
+-                }
+-
+-            } else {
+-                OPENAUTO_LOG(info) << "[Autoapp] TriggerAppStop: Manual stop wifi android auto.";
+-                try {
+-                    app->onAndroidAutoQuit();
+-                    //app->pause();
+-                } catch (...) {
+-                    OPENAUTO_LOG(error) << "[Autoapp] TriggerAppStop: stop();";
+-                }
+-
+-            }
+-        } catch (...) {
+-            OPENAUTO_LOG(info) << "[Autoapp] Exception in manual stop android auto.";
+-        }
++        OPENAUTO_LOG(info) << "[Autoapp] TriggerAppStop: Android Auto to the background.";
++        app->pause();
+     });
+ 
+     QObject::connect(&mainWindow, &autoapp::ui::MainWindow::CloseAllDialogs, [&settingsWindow, &connectdialog, &updatedialog, &warningdialog]() {

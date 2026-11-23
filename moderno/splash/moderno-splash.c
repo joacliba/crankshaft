@@ -189,6 +189,39 @@ static void push_line(const char *s)
     snprintf(lines[line_count++], LINE_LEN, "%s", s);
 }
 
+/* The kernel can swap the framebuffer during boot (firmware fb replaced by the GPU driver's one,
+ * about 4-5 s in): writes to the old mapping then show nothing. So it is reopened whenever it changes. */
+static int fd = -1;
+
+static int same_fb(void)
+{
+    int f = open("/dev/fb0", O_RDWR);
+    if (f < 0) return 1; /* in the middle of the swap: keep the old one for now */
+    struct fb_var_screeninfo v;
+    struct fb_fix_screeninfo x;
+    int same = 1;
+    if (!ioctl(f, FBIOGET_VSCREENINFO, &v) && !ioctl(f, FBIOGET_FSCREENINFO, &x))
+        same = x.smem_start == fi.smem_start && x.smem_len == fi.smem_len && !strncmp(x.id, fi.id, sizeof x.id) &&
+               v.xres == vi.xres && v.yres == vi.yres && v.bits_per_pixel == vi.bits_per_pixel;
+    close(f);
+    return same;
+}
+
+static int open_fb(void)
+{
+    if (fb && fb != MAP_FAILED) munmap(fb, fi.smem_len);
+    if (fd >= 0) close(fd);
+    free(back);
+    fb = NULL;
+    back = NULL;
+    fd = open("/dev/fb0", O_RDWR);
+    if (fd < 0 || ioctl(fd, FBIOGET_VSCREENINFO, &vi) || ioctl(fd, FBIOGET_FSCREENINFO, &fi)) return -1;
+    fb = mmap(NULL, fi.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    back = calloc(1, fi.smem_len);
+    if (fb == MAP_FAILED || !back) return -1;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: %s splash.png font.psf\n", argv[0]); return 2; }
@@ -196,45 +229,54 @@ int main(int argc, char **argv)
     signal(SIGINT, on_signal);
     signal(SIGPIPE, SIG_IGN);
 
-    int fd = open("/dev/fb0", O_RDWR);
-    if (fd < 0 || ioctl(fd, FBIOGET_VSCREENINFO, &vi) || ioctl(fd, FBIOGET_FSCREENINFO, &fi)) { perror("fb0"); return 1; }
-    fb = mmap(NULL, fi.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    back = calloc(1, fi.smem_len);
-    if (fb == MAP_FAILED || !back) { perror("mmap"); return 1; }
-
     if (load_png(argv[1])) fprintf(stderr, "moderno-splash: cannot read %s\n", argv[1]);
     if (load_psf(argv[2])) fprintf(stderr, "moderno-splash: cannot read %s\n", argv[2]);
-
-    const int W = (int)vi.xres, H = (int)vi.yres;
-    const int top_h = H * 8 / 10;
-    const int scale = H >= 900 ? 2 : 1;
-    const int margin = 12 * scale;
-    const int line_h = glyph_h * scale + 2;
-    const int visible = (H - top_h - margin) / line_h > 0 ? (H - top_h - margin) / line_h : 1;
-    const int max_chars = (W - 2 * margin) / (glyph_w * scale);
-    const uint32_t black = pack(0, 0, 0), dim = pack(120, 128, 140), bright = pack(220, 224, 232), rule = pack(40, 44, 52);
-
-    fill(0, 0, W, H, black);
-    draw_image(0, 0, W, top_h);
-    fill(margin, top_h, W - 2 * margin, 1, rule);
+    if (open_fb()) { perror("fb0"); return 1; } /* systemd restarts us */
 
     char buf[LINE_LEN], *cur = buf;
-    int dirty = 1, eof = 0;
+    int eof = 0, layout = 1, ticks = 0;
+    int W = 0, H = 0, top_h = 0, scale = 1, margin = 12, line_h = 18, visible = 1, max_chars = 1;
+    uint32_t black = 0, dim = 0, bright = 0, rule = 0;
     fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
 
+    const time_t started = time(NULL);
     while (running) {
-        if (dirty) {
-            fill(0, top_h + 1, W, H - top_h - 1, black);
-            int first = line_count > visible ? line_count - visible : 0;
-            for (int i = first; i < line_count; i++)
-                draw_text(margin, top_h + margin / 2 + (i - first) * line_h, lines[i], scale,
-                          i == line_count - 1 ? bright : dim, max_chars);
+        if (time(NULL) - started > 150) break; /* safety net if the dashboard never comes up */
+        if (++ticks >= 5) { /* about once a second */
+            ticks = 0;
+            if (!same_fb()) {
+                fprintf(stderr, "moderno-splash: framebuffer changed, reopening\n");
+                if (open_fb()) { usleep(200000); continue; }
+                layout = 1;
+            }
         }
-        { /* every pass (<=200 ms): console text and early X frames must not show through */
-            size_t start = (size_t)vi.yoffset * fi.line_length;
-            memcpy(fb + start, back + start, (size_t)H * fi.line_length);
-            dirty = 0;
+        if (layout) {
+            W = (int)vi.xres;
+            H = (int)vi.yres;
+            top_h = H * 8 / 10;
+            scale = H >= 900 ? 2 : 1;
+            margin = 12 * scale;
+            line_h = glyph_h * scale + 2;
+            visible = (H - top_h - margin) / line_h > 0 ? (H - top_h - margin) / line_h : 1;
+            max_chars = (W - 2 * margin) / (glyph_w * scale);
+            black = pack(0, 0, 0);
+            dim = pack(120, 128, 140);
+            bright = pack(220, 224, 232);
+            rule = pack(40, 44, 52);
+            fill(0, 0, W, H, black);
+            draw_image(0, 0, W, top_h);
+            fill(margin, top_h, W - 2 * margin, 1, rule);
+            layout = 0;
         }
+
+        fill(0, top_h + 1, W, H - top_h - 1, black);
+        int first = line_count > visible ? line_count - visible : 0;
+        for (int i = first; i < line_count; i++)
+            draw_text(margin, top_h + margin / 2 + (i - first) * line_h, lines[i], scale,
+                      i == line_count - 1 ? bright : dim, max_chars);
+        /* every pass (<=200 ms): console text and early X frames must not show through */
+        size_t start = (size_t)vi.yoffset * fi.line_length;
+        memcpy(fb + start, back + start, (size_t)H * fi.line_length);
 
         if (eof) { usleep(200000); continue; }
         struct pollfd p = { .fd = 0, .events = POLLIN };
@@ -246,7 +288,6 @@ int main(int argc, char **argv)
                     *cur = 0;
                     push_line(buf);
                     cur = buf;
-                    dirty = 1;
                 } else if (c != '\r') {
                     *cur++ = (c == '\t') ? ' ' : c;
                 }
