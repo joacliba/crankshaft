@@ -142,14 +142,13 @@ jobs:
           grep XKBLAYOUT $R/etc/default/keyboard
           cat $R/usr/local/bin/autoapp.md5
 
-          # Boot splash: our screen replaces plymouth; openauto stops it right before X starts.
+          # Boot splash: our screen replaces plymouth; autoapp stops it once the dashboard is drawn.
           sudo install -m 755 out/moderno-splash $R/usr/local/bin/
           sudo install -d $R/usr/share/moderno
           sudo install -m 644 out/font.psf img-out/splash.png $R/usr/share/moderno/
           sudo install -m 644 moderno/splash/moderno-splash.service $R/etc/systemd/system/
-          sudo install -d $R/etc/systemd/system/sysinit.target.wants $R/etc/systemd/system/openauto.service.d
+          sudo install -d $R/etc/systemd/system/sysinit.target.wants
           sudo ln -sf /etc/systemd/system/moderno-splash.service $R/etc/systemd/system/sysinit.target.wants/moderno-splash.service
-          printf '[Service]\nExecStartPre=+-/bin/systemctl stop moderno-splash.service\n' | sudo tee $R/etc/systemd/system/openauto.service.d/moderno-splash.conf > /dev/null
           for u in plymouth-start plymouth-read-write plymouth-quit plymouth-quit-wait; do
             sudo ln -sf /dev/null $R/etc/systemd/system/$u.service
           done
@@ -164,6 +163,8 @@ jobs:
           done
           test -f /mnt/boot/cmdline.txt
           sudo sed -i 's/ splash\b//' /mnt/boot/cmdline.txt
+          # Quiet console under the splash: no cursor, no kernel chatter.
+          sudo sed -i -E 's/ (quiet|loglevel=[0-9]+|vt\.global_cursor_default=[0-9]+|logo\.nologo)\b//g; s/$/ quiet loglevel=3 vt.global_cursor_default=0 logo.nologo/' /mnt/boot/cmdline.txt
           cat /mnt/boot/cmdline.txt
           sudo install -d /mnt/boot/crankshaft
           sudo cp img-out/wallpaper.png img-out/wallpaper-night.png /mnt/boot/crankshaft/

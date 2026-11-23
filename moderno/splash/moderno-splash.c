@@ -3,7 +3,7 @@
  *
  * Top 80% of the framebuffer: a PNG (logo + name), scaled to fit and centred.
  * Bottom 20%: the last boot log lines read from stdin (journalctl -f), drawn with a PSF console font.
- * Runs until systemd stops it (openauto.service does so before X starts).
+ * Runs until systemd stops it (autoapp does so once the dashboard is on screen).
  *
  * usage: journalctl -b -f -o short-monotonic | moderno-splash splash.png font.psf
  * build: gcc -O2 -Wall -o moderno-splash moderno-splash.c -lpng
@@ -220,7 +220,6 @@ int main(int argc, char **argv)
 
     char buf[LINE_LEN], *cur = buf;
     int dirty = 1, eof = 0;
-    time_t last_copy = 0;
     fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
 
     while (running) {
@@ -231,11 +230,9 @@ int main(int argc, char **argv)
                 draw_text(margin, top_h + margin / 2 + (i - first) * line_h, lines[i], scale,
                           i == line_count - 1 ? bright : dim, max_chars);
         }
-        time_t now = time(NULL);
-        if (dirty || now - last_copy >= 2) { /* also now and then: console text may scribble on fb */
+        { /* every pass (<=200 ms): console text and early X frames must not show through */
             size_t start = (size_t)vi.yoffset * fi.line_length;
             memcpy(fb + start, back + start, (size_t)H * fi.line_length);
-            last_copy = now;
             dirty = 0;
         }
 

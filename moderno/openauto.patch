@@ -364,7 +364,7 @@ index 0d7ae56..99ad06e 100644
          promise_->reject(aasdk::error::Error());
      }
 diff --git a/src/autoapp/Service/SensorService.cpp b/src/autoapp/Service/SensorService.cpp
-index e4348a4..ad6fc93 100644
+index e4348a4..cda6075 100644
 --- a/src/autoapp/Service/SensorService.cpp
 +++ b/src/autoapp/Service/SensorService.cpp
 @@ -21,6 +21,7 @@
@@ -386,15 +386,22 @@ index e4348a4..ad6fc93 100644
          this->sensorPolling();
  
          OPENAUTO_LOG(info) << "[SensorService] start.";
-@@ -104,6 +103,7 @@ void SensorService::fillFeatures(aasdk::proto::messages::ServiceDiscoveryRespons
+@@ -104,7 +103,13 @@ void SensorService::fillFeatures(aasdk::proto::messages::ServiceDiscoveryRespons
      auto* sensorChannel = channelDescriptor->mutable_sensor_channel();
      sensorChannel->add_sensors()->set_type(aasdk::proto::enums::SensorType::DRIVING_STATUS);
      sensorChannel->add_sensors()->set_type(aasdk::proto::enums::SensorType::LOCATION);
-+    // Android Auto's "automatic" day/night follows this signal; see computeNight().
-     sensorChannel->add_sensors()->set_type(aasdk::proto::enums::SensorType::NIGHT_DATA);
+-    sensorChannel->add_sensors()->set_type(aasdk::proto::enums::SensorType::NIGHT_DATA);
++    // Without a trusted clock the head unit cannot tell day from night: then NIGHT_DATA is not
++    // offered at all and Android Auto uses the phone's own day/night (phone clock and location).
++    if(is_file_exist("/boot/crankshaft/car_daynight") || is_file_exist("/tmp/clock_synced") ||
++       is_file_exist("/run/systemd/timesync/synchronized"))
++    {
++        sensorChannel->add_sensors()->set_type(aasdk::proto::enums::SensorType::NIGHT_DATA);
++    }
  }
  
-@@ -225,7 +225,7 @@ void SensorService::sensorPolling()
+ void SensorService::onChannelOpenRequest(const aasdk::proto::messages::ChannelOpenRequest& request)
+@@ -225,7 +230,7 @@ void SensorService::sensorPolling()
  {
      if (!this->stopPolling) {
          strand_.dispatch([this, self = this->shared_from_this()]() {
@@ -403,7 +410,7 @@ index e4348a4..ad6fc93 100644
              if (this->previous != this->isNight && !this->firstRun) {
                  this->previous = this->isNight;
                  this->sendNightData();
-@@ -256,6 +256,46 @@ void SensorService::sensorPolling()
+@@ -256,6 +261,46 @@ void SensorService::sensorPolling()
      }
  }
  
@@ -451,18 +458,36 @@ index e4348a4..ad6fc93 100644
  {
      std::ifstream ifile(fileName, std::ios::in);
 diff --git a/src/autoapp/UI/MainWindow.cpp b/src/autoapp/UI/MainWindow.cpp
-index 7a3166c..c5f6b5b 100644
+index 7a3166c..29a9cce 100644
 --- a/src/autoapp/UI/MainWindow.cpp
 +++ b/src/autoapp/UI/MainWindow.cpp
-@@ -23,6 +23,7 @@
+@@ -23,6 +23,8 @@
  #include "ui_mainwindow.h"
  #include <QTimer>
  #include <QDateTime>
 +#include <QLocale>
++#include <QPainter>
  #include <QMessageBox>
  #include <QTextStream>
  #include <QFontDatabase>
-@@ -533,25 +534,11 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
+@@ -86,6 +88,16 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
+     this->wallpaperEQFileExists = check_file_exist("wallpaper-eq.png");
+ 
+     ui_->setupUi(this);
++    // Moderno: Peugeot-style monochrome icons (the stock ones are coloured).
++    for (QPushButton* b : this->findChildren<QPushButton*>()) {
++        if (b->icon().isNull() || b == ui_->pushButtonBack || b->objectName().startsWith("pushButton_c")) continue;
++        QPixmap pm = b->icon().pixmap(b->iconSize().isValid() ? b->iconSize() * 2 : QSize(128, 128));
++        QPainter painter(&pm);
++        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
++        painter.fillRect(pm.rect(), QColor(236, 240, 245));
++        painter.end();
++        b->setIcon(QIcon(pm));
++    }
+ 
+     connect(ui_->pushButtonSettings, &QPushButton::clicked, this, &MainWindow::openSettings);
+     connect(ui_->pushButtonSettings2, &QPushButton::clicked, this, &MainWindow::openSettings);
+@@ -533,25 +545,11 @@ MainWindow::MainWindow(configuration::IConfiguration::Pointer configuration, QWi
      ui_->comboBoxAlbum->hide();
      ui_->pushButtonAlbum->hide();
  
@@ -492,7 +517,7 @@ index 7a3166c..c5f6b5b 100644
  
      watcher_tmp = new QFileSystemWatcher(this);
      watcher_tmp->addPath("/tmp");
-@@ -781,54 +768,54 @@ void f1x::openauto::autoapp::ui::MainWindow::updateAlpha()
+@@ -781,54 +779,71 @@ void f1x::openauto::autoapp::ui::MainWindow::updateAlpha()
          this->alpha_current_str = value;
          double alpha = value/100.0;
          QString alp=QString::number(alpha);
@@ -591,10 +616,27 @@ index 7a3166c..c5f6b5b 100644
 +        ui_->pushButtonCameraShow2->setStyleSheet( "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(62, 68, 80, " + alp + " ), stop:1 rgba(22, 25, 31, " + alp + " )); color: rgb(255, 255, 255); border-radius: 18px; border: 1px solid rgba(255,255,255,0.14);");
 +        ui_->pushButtonVolume2->setStyleSheet( "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(62, 68, 80, " + alp + " ), stop:1 rgba(22, 25, 31, " + alp + " )); color: rgb(255, 255, 255); border-radius: 18px; border: 1px solid rgba(255,255,255,0.14);");
 +        ui_->pushButtonDebug2->setStyleSheet( "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(62, 68, 80, " + alp + " ), stop:1 rgba(22, 25, 31, " + alp + " )); color: rgb(255, 255, 255); border-radius: 18px; border: 1px solid rgba(255,255,255,0.14);");
++        // Moderno: Peugeot i-Connect look, flat near-black tiles, hairline border, blue accent on touch.
++        const QString tile = "QPushButton{background: rgba(18, 21, 27, " + alp + "); border: 1px solid rgba(255,255,255,0.09); border-radius: 14px; color: rgb(236,240,245);}"
++                             " QPushButton:pressed{background: rgba(0, 120, 210, 0.45); border: 1px solid rgb(64, 170, 255);}"
++                             " QPushButton:focus{border: 1px solid rgba(64,170,255,0.8);}";
++        const QString danger = "QPushButton{background: rgba(18, 21, 27, " + alp + "); border: 1px solid rgba(232, 72, 60, 0.75); border-radius: 14px; color: rgb(255,120,110);}"
++                               " QPushButton:pressed{background: rgba(200, 40, 30, 0.6);}";
++        const QString accent = "background: rgba(0, 104, 196, " + alp + "); color: rgb(255,255,255); border: 0px;";
++        for (QPushButton* b : this->findChildren<QPushButton*>()) {
++            if (b->objectName().startsWith("pushButton_c")) continue; // user-chosen colours
++            b->setStyleSheet(tile);
++        }
++        ui_->pushButtonExit->setStyleSheet(danger);
++        ui_->pushButtonShutdown->setStyleSheet(danger);
++        ui_->pushButtonAndroidAuto->setStyleSheet("QPushButton{" + accent + "} QPushButton:pressed{background: rgb(0, 140, 240);}");
++        ui_->labelAndroidAutoTop->setStyleSheet(accent + " border-top-left-radius: 14px; border-top-right-radius: 14px;");
++        ui_->labelAndroidAutoBottom->setStyleSheet(accent + " border-bottom-left-radius: 14px; border-bottom-right-radius: 14px;");
++        ui_->pushButtonNoDevice->setStyleSheet("QPushButton{" + accent + " border-radius: 14px;}");
      }
  }
  
-@@ -1089,13 +1076,12 @@ void f1x::openauto::autoapp::ui::MainWindow::showTime()
+@@ -1089,13 +1104,12 @@ void f1x::openauto::autoapp::ui::MainWindow::showTime()
  {
      QTime time=QTime::currentTime();
      QDate date=QDate::currentDate();
@@ -626,10 +668,18 @@ index cb616f4..ea402c1 100644
      ui_->labelTestInProgress->hide();
  
 diff --git a/src/autoapp/autoapp.cpp b/src/autoapp/autoapp.cpp
-index b8fcfd0..01425c2 100644
+index b8fcfd0..7fb310e 100644
 --- a/src/autoapp/autoapp.cpp
 +++ b/src/autoapp/autoapp.cpp
-@@ -104,6 +104,16 @@ int main(int argc, char* argv[])
+@@ -19,6 +19,7 @@
+ #include <thread>
+ #include <QApplication>
+ #include <QDesktopWidget>
++#include <QTimer>
+ #include <aasdk/USB/USBHub.hpp>
+ #include <aasdk/USB/ConnectedAccessoriesEnumerator.hpp>
+ #include <aasdk/USB/AccessoryModeQueryChain.hpp>
+@@ -104,6 +105,16 @@ int main(int argc, char* argv[])
      startIOServiceWorkers(ioService, threadPool);
  
      QApplication qApplication(argc, argv);
@@ -646,3 +696,17 @@ index b8fcfd0..01425c2 100644
      const int width = QApplication::desktop()->width();
      const int height = QApplication::desktop()->height();
      OPENAUTO_LOG(info) << "[OpenAuto] Display width: " << width;
+@@ -212,6 +223,13 @@ int main(int argc, char* argv[])
+     mainWindow.setFixedSize(width, height);
+     mainWindow.adjustSize();
+ 
++    // The boot splash stays over everything until the dashboard is really up, then a full repaint
++    // wipes what it drew on the framebuffer.
++    QTimer::singleShot(1500, &mainWindow, [&mainWindow]() {
++        system("sudo -n systemctl stop moderno-splash.service");
++        mainWindow.repaint();
++    });
++
+     aasdk::usb::USBWrapper usbWrapper(usbContext);
+     aasdk::usb::AccessoryModeQueryFactory queryFactory(usbWrapper, ioService);
+     aasdk::usb::AccessoryModeQueryChainFactory queryChainFactory(usbWrapper, ioService, queryFactory);

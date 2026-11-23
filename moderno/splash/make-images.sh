@@ -24,12 +24,12 @@ else
     "$OUT/splash.png"
 fi
 
-# Wallpapers: graphite gradient with a soft blue light under the tiles (day) / dimmer (night).
+# Wallpapers: near-black like Peugeot i-Connect, a faint blue light under the tiles (day) / dimmer (night).
 wallpaper() { # top bottom glow-alpha file
   convert -size 1280x800 gradient:"$1"-"$2" \
     \( -size 1280x500 radial-gradient:"rgba(70,125,210,$3)"-"rgba(0,0,0,0)" \) \
     -gravity south -geometry +0-120 -composite "$4"
 }
-wallpaper '#1b1f26' '#06070a' 0.38 "$OUT/wallpaper.png"
-wallpaper '#0e1014' '#030304' 0.20 "$OUT/wallpaper-night.png"
+wallpaper '#0d0f13' '#000000' 0.22 "$OUT/wallpaper.png"
+wallpaper '#07080a' '#000000' 0.10 "$OUT/wallpaper-night.png"
 ls -la "$OUT"

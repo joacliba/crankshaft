@@ -6,6 +6,8 @@ Before=sysinit.target
 
 [Service]
 Type=simple
+# Safety net if the dashboard never comes up.
+RuntimeMaxSec=150
 ExecStart=/bin/sh -c 'journalctl -b -f -n 30 -o short-monotonic | /usr/local/bin/moderno-splash /usr/share/moderno/splash.png /usr/share/moderno/font.psf'
 
 [Install]
